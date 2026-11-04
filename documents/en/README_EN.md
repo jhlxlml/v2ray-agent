@@ -32,6 +32,16 @@ An installation and management script for Xray-core and sing-box, with regular h
 
 Use a complete source checkout from the [fork](https://github.com/jhlxlml/v2ray-agent) at a reviewed commit. Install a reviewed acme.sh release first for TLS.
 
+### One-command online installation
+
+Paste this command on Linux with Bash, Git, and sudo installed. It fetches the full source tree from the fork, verifies the pinned commit, and starts the English installer. The pinned commit must be available on GitHub.
+
+```bash
+bash -c 'set -eu; rev=7c95c9fd75ee74e062ba328b56ed05ba28991adb; tmp=$(mktemp -d); trap "rm -rf -- \"\$tmp\"" EXIT; git -C "$tmp" init -q; git -C "$tmp" fetch -q --depth=1 https://github.com/jhlxlml/v2ray-agent.git "$rev"; test "$(git -C "$tmp" rev-parse FETCH_HEAD)" = "$rev"; git -C "$tmp" checkout -q --detach "$rev"; cd "$tmp"; sudo bash shell/install_en.sh'
+```
+
+For Docker Reality, install and start Docker first, then replace `shell/install_en.sh` at the end of the command with `shell/docker_reality_en.sh`.
+
 ### Installation
 
 ```

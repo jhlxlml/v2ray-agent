@@ -32,6 +32,16 @@
 
 从 [当前 Fork](https://github.com/jhlxlml/v2ray-agent) 获取完整源码，在本地检出已审核的固定提交后执行。TLS 安装还需要预先安装经审核的 acme.sh。
 
+### 联网一键安装
+
+在 Linux 上粘贴运行。需要预装 Bash、Git 和 sudo。命令从 Fork 获取完整源码，核对固定提交，再启动中文版安装菜单。该提交须已同步到 GitHub。
+
+```bash
+bash -c 'set -eu; rev=7c95c9fd75ee74e062ba328b56ed05ba28991adb; tmp=$(mktemp -d); trap "rm -rf -- \"\$tmp\"" EXIT; git -C "$tmp" init -q; git -C "$tmp" fetch -q --depth=1 https://github.com/jhlxlml/v2ray-agent.git "$rev"; test "$(git -C "$tmp" rev-parse FETCH_HEAD)" = "$rev"; git -C "$tmp" checkout -q --detach "$rev"; cd "$tmp"; sudo bash install.sh'
+```
+
+Docker Reality 版可将命令末尾的 `install.sh` 换为 `shell/docker_reality.sh`，并预先安装和启动 Docker。
+
 ### 安装脚本版
 
 ```
