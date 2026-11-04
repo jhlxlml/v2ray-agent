@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+
+umask 077
 # 检测区
 # -------------------------------------------------------------
 # 检查系统
@@ -1001,7 +1003,7 @@ allowPort() {
         fi
 
         if echo "${updateFirewalldStatus}" | grep -q "true"; then
-            firewall-cmd --reload
+            firewall-cmd --zone=public --add-port="${firewallPort}/${type}"
         fi
     elif rc-update show 2>/dev/null | grep -q ufw; then
         if ufw status | grep -q "Status: active"; then
@@ -1411,13 +1413,18 @@ mkdirTools() {
     mkdir -p /etc/v2ray-agent/xray/reality_scan
     mkdir -p /etc/v2ray-agent/xray/tmp
     mkdir -p /etc/systemd/system/
-    mkdir -p /tmp/v2ray-agent-tls/
 
     mkdir -p /etc/v2ray-agent/warp
 
     mkdir -p /etc/v2ray-agent/sing-box/conf/config
 
-    mkdir -p /usr/share/nginx/html/
+    (umask 022; mkdir -p /usr/share/nginx/html/)
+    chmod 711 /etc/v2ray-agent
+    chmod 700 /etc/v2ray-agent/{tls,xray,sing-box,warp,subscribe_local,subscribe_remote}
+    local privateDir
+    for privateDir in tls xray/conf sing-box/conf warp subscribe_local subscribe_remote; do
+        find -P "/etc/v2ray-agent/${privateDir}" -type f ! -perm /111 -exec chmod 600 {} +
+    done
 }
 # 检测root
 checkRoot() {
@@ -1448,7 +1455,7 @@ installTools() {
     fi
 
     if [[ "${release}" == "centos" ]]; then
-        rm -rf /var/run/yum.pid
+        rm -f /var/run/yum.pid
         ${installType} epel-release >/dev/null 2>&1
     fi
 
@@ -1599,20 +1606,9 @@ installTools() {
     if [[ "${selectCustomInstallType}" == "7" ]]; then
         echoContent green " ---> 检测到无需依赖证书的服务，跳过安装"
     else
-        if [[ ! -d "$HOME/.acme.sh" ]] || [[ -d "$HOME/.acme.sh" && -z $(find "$HOME/.acme.sh/acme.sh") ]]; then
-            echoContent green " ---> 安装acme.sh"
-            curl -s https://get.acme.sh | sh >/etc/v2ray-agent/tls/acme.log 2>&1
-
-            if [[ ! -d "$HOME/.acme.sh" ]] || [[ -z $(find "$HOME/.acme.sh/acme.sh") ]]; then
-                echoContent red "  acme安装失败--->"
-                tail -n 100 /etc/v2ray-agent/tls/acme.log
-                echoContent yellow "错误排查:"
-                echoContent red "  1.获取Github文件失败，请等待Github恢复后尝试，恢复进度可查看 [https://www.githubstatus.com/]"
-                echoContent red "  2.acme.sh脚本出现bug，可查看[https://github.com/acmesh-official/acme.sh] issues"
-                echoContent red "  3.如纯IPv6机器，请设置NAT64,可执行下方命令，如果添加下方命令还是不可用，请尝试更换其他NAT64"
-                echoContent skyBlue "  sed -i \"1i\\\nameserver 2a00:1098:2b::1\\\nnameserver 2a00:1098:2c::1\\\nnameserver 2a01:4f8:c2c:123f::1\\\nnameserver 2a01:4f9:c010:3f02::1\" /etc/resolv.conf"
-                exit 0
-            fi
+        if [[ ! -x "$HOME/.acme.sh/acme.sh" ]]; then
+            echoContent red "Install a reviewed acme.sh release in $HOME/.acme.sh first."
+            return 1
         fi
     fi
 
@@ -1629,48 +1625,6 @@ bootStartup() {
 }
 # 安装Nginx
 installNginxTools() {
-
-    if [[ "${release}" == "debian" ]]; then
-        sudo apt install gnupg2 ca-certificates lsb-release -y >/dev/null 2>&1
-        echo "deb http://nginx.org/packages/mainline/debian $(lsb_release -cs) nginx" | sudo tee /etc/apt/sources.list.d/nginx.list >/dev/null 2>&1
-        echo -e "Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n" | sudo tee /etc/apt/preferences.d/99nginx >/dev/null 2>&1
-        curl -o /tmp/nginx_signing.key https://nginx.org/keys/nginx_signing.key >/dev/null 2>&1
-        # gpg --dry-run --quiet --import --import-options import-show /tmp/nginx_signing.key
-        sudo mv /tmp/nginx_signing.key /etc/apt/trusted.gpg.d/nginx_signing.asc
-        sudo apt update >/dev/null 2>&1
-
-    elif [[ "${release}" == "ubuntu" ]]; then
-        sudo apt install gnupg2 ca-certificates lsb-release -y >/dev/null 2>&1
-        echo "deb http://nginx.org/packages/mainline/ubuntu $(lsb_release -cs) nginx" | sudo tee /etc/apt/sources.list.d/nginx.list >/dev/null 2>&1
-        echo -e "Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n" | sudo tee /etc/apt/preferences.d/99nginx >/dev/null 2>&1
-        curl -o /tmp/nginx_signing.key https://nginx.org/keys/nginx_signing.key >/dev/null 2>&1
-        # gpg --dry-run --quiet --import --import-options import-show /tmp/nginx_signing.key
-        sudo mv /tmp/nginx_signing.key /etc/apt/trusted.gpg.d/nginx_signing.asc
-        sudo apt update >/dev/null 2>&1
-
-    elif [[ "${release}" == "centos" ]]; then
-        ${installType} yum-utils >/dev/null 2>&1
-        cat <<EOF >/etc/yum.repos.d/nginx.repo
-[nginx-stable]
-name=nginx stable repo
-baseurl=http://nginx.org/packages/centos/\$releasever/\$basearch/
-gpgcheck=1
-enabled=1
-gpgkey=https://nginx.org/keys/nginx_signing.key
-module_hotfixes=true
-
-[nginx-mainline]
-name=nginx mainline repo
-baseurl=http://nginx.org/packages/mainline/centos/\$releasever/\$basearch/
-gpgcheck=1
-enabled=0
-gpgkey=https://nginx.org/keys/nginx_signing.key
-module_hotfixes=true
-EOF
-        sudo yum-config-manager --enable nginx-mainline >/dev/null 2>&1
-    elif [[ "${release}" == "alpine" ]]; then
-        rm "${nginxConfigPath}default.conf"
-    fi
     if ! ${installType} nginx >/dev/null 2>&1; then
         echoContent red " ---> Nginx安装失败"
         return 1
@@ -1685,24 +1639,11 @@ installWarp() {
         exit 0
     fi
 
-    ${installType} gnupg2 -y >/dev/null 2>&1
-    if [[ "${release}" == "debian" ]]; then
-        curl -s https://pkg.cloudflareclient.com/pubkey.gpg | sudo apt-key add - >/dev/null 2>&1
-        echo "deb http://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null 2>&1
-        sudo apt update >/dev/null 2>&1
-
-    elif [[ "${release}" == "ubuntu" ]]; then
-        curl -s https://pkg.cloudflareclient.com/pubkey.gpg | sudo apt-key add - >/dev/null 2>&1
-        echo "deb http://pkg.cloudflareclient.com/ focal main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null 2>&1
-        sudo apt update >/dev/null 2>&1
-
-    elif [[ "${release}" == "centos" ]]; then
-        ${installType} yum-utils >/dev/null 2>&1
-        sudo rpm -ivh "http://pkg.cloudflareclient.com/cloudflare-release-el${centosVersion}.rpm" >/dev/null 2>&1
-    fi
-
+    # Use an administrator-configured signed package repository.
     echoContent green " ---> 安装WARP"
-    ${installType} cloudflare-warp >/dev/null 2>&1
+    if ! command -v warp-cli >/dev/null 2>&1; then
+        ${installType} cloudflare-warp || return 1
+    fi
     if [[ -z $(which warp-cli) ]]; then
         echoContent red " ---> 安装WARP失败"
         exit 0
@@ -1879,7 +1820,7 @@ removeNginxDefaultConf() {
     if [[ -f ${nginxConfigPath}default.conf ]]; then
         if [[ "$(grep -c "server_name" <${nginxConfigPath}default.conf)" == "1" ]] && [[ "$(grep -c "server_name  localhost;" <${nginxConfigPath}default.conf)" == "1" ]]; then
             echoContent green " ---> 删除Nginx默认配置"
-            rm -rf ${nginxConfigPath}default.conf >/dev/null 2>&1
+            rm -f ${nginxConfigPath}default.conf >/dev/null 2>&1
         fi
     fi
 }
@@ -2609,31 +2550,43 @@ handleNginx() {
 }
 
 # 定时任务更新tls证书
-installCronTLS() {
-    if [[ -z "${btDomain}" ]]; then
-        echoContent skyBlue "\n进度 $1/${totalProgress} : 添加定时维护证书"
-        crontab -l >/etc/v2ray-agent/backup_crontab.cron
-        local historyCrontab
-        historyCrontab=$(sed '/v2ray-agent/d;/acme.sh/d' /etc/v2ray-agent/backup_crontab.cron)
-        echo "${historyCrontab}" >/etc/v2ray-agent/backup_crontab.cron
-        echo "30 1 * * * /bin/bash /etc/v2ray-agent/install.sh RenewTLS >> /etc/v2ray-agent/crontab_tls.log 2>&1" >>/etc/v2ray-agent/backup_crontab.cron
-        crontab /etc/v2ray-agent/backup_crontab.cron
-        echoContent green "\n ---> 添加定时维护证书成功"
+editAgentCron() (
+    umask 077
+    local action=$1 job=${2:-} tmp
+    tmp=$(mktemp -d) || return 1
+    trap 'rm -rf -- "${tmp}"' EXIT
+    if ! LC_ALL=C crontab -l >"${tmp}/original" 2>"${tmp}/error"; then
+        if ! grep -Eq '^no crontab for [^ ]+$' "${tmp}/error"; then
+            cat "${tmp}/error" >&2
+            return 1
+        fi
+        : >"${tmp}/original"
     fi
+    cp "${tmp}/original" "${tmp}/next" || return 1
+    local name schedule line
+    for name in RenewTLS UpdateGeo; do
+        [[ "${action}" == remove || "${name}" == "${job}" ]] || continue
+        case "${name}" in
+            RenewTLS) schedule='30 1 * * *' ;;
+            UpdateGeo) schedule='35 1 * * *' ;;
+        esac
+        line="${schedule} /bin/bash /etc/v2ray-agent/install.sh ${name} >> /etc/v2ray-agent/crontab_tls.log 2>&1"
+        awk -v line="${line}" '$0 != line' "${tmp}/next" >"${tmp}/filtered" &&
+            mv "${tmp}/filtered" "${tmp}/next" || return 1
+        if [[ "${action}" == add ]]; then
+            printf '%s\n' "${line}" >>"${tmp}/next" || return 1
+        fi
+    done
+    cmp -s "${tmp}/original" "${tmp}/next" && return 0
+    crontab "${tmp}/next"
+)
+
+installCronTLS() {
+    [[ -n "${btDomain}" ]] || editAgentCron add RenewTLS
 }
 # 定时任务更新geo文件
 installCronUpdateGeo() {
-    if [[ "${coreInstallType}" == "1" ]]; then
-        if crontab -l | grep -q "UpdateGeo"; then
-            echoContent red "\n ---> 已添加自动更新定时任务，请不要重复添加"
-            exit 0
-        fi
-        echoContent skyBlue "\n进度 1/1 : 添加定时更新geo文件"
-        crontab -l >/etc/v2ray-agent/backup_crontab.cron
-        echo "35 1 * * * /bin/bash /etc/v2ray-agent/install.sh UpdateGeo >> /etc/v2ray-agent/crontab_tls.log 2>&1" >>/etc/v2ray-agent/backup_crontab.cron
-        crontab /etc/v2ray-agent/backup_crontab.cron
-        echoContent green "\n ---> 添加定时更新geo文件成功"
-    fi
+    [[ "${coreInstallType}" != 1 ]] || editAgentCron add UpdateGeo
 }
 
 # 更新证书
@@ -2753,37 +2706,52 @@ renewalTLS() {
 }
 
 # Download and validate the new binary before replacing the installed core.
+verifyReleaseAsset() {
+    local repo=$1 version=$2 asset=$3 file=$4 digest
+    digest=$(curl -q -fsS --max-time 20 --proto '=https' \
+        "https://api.github.com/repos/${repo}/releases/tags/${version}" |
+        jq -er --arg asset "${asset}" --arg version "${version}" '
+            select(.tag_name == $version and .draft == false) |
+            .assets[] | select(.name == $asset and .state == "uploaded") | .digest
+        ') || return 1
+    [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+    printf '%s  %s\n' "${digest#sha256:}" "${file}" | sha256sum -c --status
+}
+
 installCoreRelease() (
-    local core=$1 version=$2 coreDir archive binary tmpDir
-    local -a wgetArgs=(-q)
-    [[ "${version}" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] || {
-        echoContent red " ---> 无法读取有效的核心版本，保留当前程序"
-        return 1
-    }
+    local core=$1 version=$2 coreDir asset binary repo tmpDir
+    [[ "${version}" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] || return 1
+    case "${core}" in
+        sing-box)
+            repo=SagerNet/sing-box
+            asset="sing-box-${version#v}${singBoxCoreCPUVendor}.tar.gz"
+            binary="${asset%.tar.gz}/sing-box"
+            ;;
+        xray)
+            repo=XTLS/Xray-core
+            asset="${xrayCoreCPUVendor}.zip"
+            binary=xray
+            ;;
+        *) return 1 ;;
+    esac
+    [[ "${asset}" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
     coreDir="/etc/v2ray-agent/${core}"
     mkdir -p "${coreDir}" || return 1
     tmpDir=$(mktemp -d "${coreDir}/.release.XXXXXX") || return 1
-    trap 'rm -rf "${tmpDir}"' EXIT
-    if [[ "${release}" != alpine && -n "${wgetShowProgressStatus}" ]]; then
-        wgetArgs+=("${wgetShowProgressStatus}")
-    fi
+    trap 'rm -rf -- "${tmpDir}"' EXIT
+    curl -q -fsSL --proto '=https' --proto-redir '=https' --max-time 300 \
+        -o "${tmpDir}/${asset}" "https://github.com/${repo}/releases/download/${version}/${asset}" &&
+        verifyReleaseAsset "${repo}" "${version}" "${asset}" "${tmpDir}/${asset}" || {
+            echoContent red "Release asset verification failed: ${repo} ${version} ${asset}"
+            return 1
+        }
     if [[ "${core}" == sing-box ]]; then
-        archive="sing-box-${version#v}${singBoxCoreCPUVendor}"
-        wget "${wgetArgs[@]}" -O "${tmpDir}/archive.tar.gz" \
-            "https://github.com/SagerNet/sing-box/releases/download/${version}/${archive}.tar.gz" &&
-            tar -xzf "${tmpDir}/archive.tar.gz" -C "${tmpDir}" || return 1
-        binary="${tmpDir}/${archive}/sing-box"
-        [[ -s "${binary}" ]] && chmod 755 "${binary}" && "${binary}" version >/dev/null 2>&1 || return 1
-    elif [[ "${core}" == xray ]]; then
-        wget "${wgetArgs[@]}" -O "${tmpDir}/archive.zip" \
-            "https://github.com/XTLS/Xray-core/releases/download/${version}/${xrayCoreCPUVendor}.zip" &&
-            unzip -oq "${tmpDir}/archive.zip" -d "${tmpDir}" || return 1
-        binary="${tmpDir}/xray"
-        [[ -s "${binary}" ]] && chmod 755 "${binary}" && "${binary}" --version >/dev/null 2>&1 || return 1
+        tar -xzf "${tmpDir}/${asset}" -C "${tmpDir}" "${binary}" || return 1
     else
-        return 1
+        unzip -oq "${tmpDir}/${asset}" "${binary}" -d "${tmpDir}" || return 1
     fi
-    mv -f "${binary}" "${coreDir}/${core}"
+    [[ -f "${tmpDir}/${binary}" && ! -L "${tmpDir}/${binary}" ]] || return 1
+    chmod 755 "${tmpDir}/${binary}" && mv -f "${tmpDir}/${binary}" "${coreDir}/${core}"
 )
 
 # 安装 sing-box
@@ -2920,7 +2888,7 @@ xrayVersionManageMenu() {
     elif [[ "${selectXrayType}" == "7" ]]; then
         updateGeoSite
     elif [[ "${selectXrayType}" == "8" ]]; then
-        installCronUpdateGeo
+        installCronUpdateGeo || return 1
     elif [[ "${selectXrayType}" == "9" ]]; then
         checkLog 1
     fi
@@ -3095,7 +3063,7 @@ installSingBoxService() {
     local execStart='/etc/v2ray-agent/sing-box/sing-box run -c /etc/v2ray-agent/sing-box/conf/config.json'
 
     if [[ -n $(find /bin /usr/bin -name "systemctl") && "${release}" != "alpine" ]]; then
-        rm -rf /etc/systemd/system/sing-box.service
+        rm -f /etc/systemd/system/sing-box.service
         touch /etc/systemd/system/sing-box.service
         cat <<EOF >/etc/systemd/system/sing-box.service
 [Unit]
@@ -3105,9 +3073,11 @@ After=network.target nss-lookup.target
 
 [Service]
 User=root
+NoNewPrivileges=yes
+ProtectSystem=full
 WorkingDirectory=/root
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 ExecStart=${execStart}
 ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
@@ -3140,7 +3110,7 @@ installXrayService() {
     echoContent skyBlue "\n进度  $1/${totalProgress} : 配置Xray开机自启"
     execStart='/etc/v2ray-agent/xray/xray run -confdir /etc/v2ray-agent/xray/conf'
     if [[ -n $(find /bin /usr/bin -name "systemctl") ]]; then
-        rm -rf /etc/systemd/system/xray.service
+        rm -f /etc/systemd/system/xray.service
         touch /etc/systemd/system/xray.service
         cat <<EOF >/etc/systemd/system/xray.service
 [Unit]
@@ -3149,6 +3119,9 @@ Documentation=https://github.com/xtls
 After=network.target nss-lookup.target
 [Service]
 User=root
+NoNewPrivileges=yes
+ProtectSystem=full
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 ExecStart=${execStart}
 Restart=on-failure
 RestartPreventExitStatus=23
@@ -4409,7 +4382,7 @@ removeSingBoxConfig() {
 addSingBoxWireGuardEndpoints() {
     local type=$1
 
-    readConfigWarpReg
+    readConfigWarpReg || return 1
 
     cat <<EOF >"${singBoxConfigPath}wireguard_endpoints_${type}.json"
 {
@@ -5578,7 +5551,7 @@ EOF
         removeNginxDefaultConf
         handleSingBox stop
         randomPathFunction
-        rm -rf "${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf" >/dev/null 2>&1
+        rm -f "${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf" >/dev/null 2>&1
         checkPortOpen "${result[-1]}" "${domain}" || return 1
         singBoxNginxConfig "$1" "${result[-1]}"
         bootStartup nginx
@@ -6916,57 +6889,51 @@ unInstall() {
         menu
         exit 0
     fi
+    editAgentCron remove || return 1
     removeAllPortHopping || {
         echoContent red " ---> 端口跳跃清理失败，已停止卸载，请检查防火墙后重试"
         return 1
     }
     # checkBTPanel
-    echoContent yellow " ---> 脚本不会删除acme相关配置，删除请手动执行 [rm -rf /root/.acme.sh]"
-    handleNginx stop
-    if ! isNginxRunning; then
-        echoContent green " ---> 停止Nginx成功"
-    fi
     if [[ "${release}" == "alpine" ]]; then
         if [[ "${coreInstallType}" == "1" ]]; then
             handleXray stop
             rc-update del xray default
-            rm -rf /etc/init.d/xray
+            rm -f /etc/init.d/xray
             echoContent green " ---> 删除Xray开机自启完成"
         fi
         if [[ "${coreInstallType}" == "2" || -n "${singBoxConfigPath}" ]]; then
             handleSingBox stop
             rc-update del sing-box default
-            rm -rf /etc/init.d/sing-box
+            rm -f /etc/init.d/sing-box
             echoContent green " ---> 删除sing-box开机自启完成"
         fi
     else
         if [[ "${coreInstallType}" == "1" ]]; then
             handleXray stop
-            rm -rf /etc/systemd/system/xray.service
+            rm -f /etc/systemd/system/xray.service
             echoContent green " ---> 删除Xray开机自启完成"
         fi
         if [[ "${coreInstallType}" == "2" || -n "${singBoxConfigPath}" ]]; then
             handleSingBox stop
-            rm -rf /etc/systemd/system/sing-box.service
+            rm -f /etc/systemd/system/sing-box.service
             echoContent green " ---> 删除sing-box开机自启完成"
         fi
     fi
 
-    rm -rf /etc/v2ray-agent
-    rm -rf ${nginxConfigPath}alone.conf
-    rm -rf ${nginxConfigPath}checkPortOpen.conf >/dev/null 2>&1
-    rm -rf "${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf" >/dev/null 2>&1
-    rm -rf ${nginxConfigPath}checkPortOpen.conf >/dev/null 2>&1
+    rm -rf -- /etc/v2ray-agent/{xray,sing-box,tls,warp,subscribe,subscribe_local,subscribe_remote,port-hopping} || return 1
+    rm -f -- /etc/v2ray-agent/{install.sh,install.log,crontab_tls.log,crontab_updateGeoSite.log}
+    rm -f ${nginxConfigPath}alone.conf
+    rm -f ${nginxConfigPath}checkPortOpen.conf >/dev/null 2>&1
+    rm -f "${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf" >/dev/null 2>&1
+    rm -f ${nginxConfigPath}checkPortOpen.conf >/dev/null 2>&1
 
     unInstallSubscribe
+    if isNginxRunning; then nginx -t && nginx -s reload || return 1; fi
 
-    if [[ -d "${nginxStaticPath}" && -f "${nginxStaticPath}/check" ]]; then
-        rm -rf "${nginxStaticPath}"
-        echoContent green " ---> 删除伪装网站完成"
-    fi
 
-    rm -rf /usr/bin/vasma
-    rm -rf /usr/sbin/vasma
+    rm -f /usr/bin/vasma
+    rm -f /usr/sbin/vasma
     echoContent green " ---> 卸载快捷方式完成"
     echoContent green " ---> 卸载v2ray-agent脚本完成"
 }
@@ -7464,20 +7431,6 @@ updateV2RayAgent() {
 }
 
 # 防火墙
-handleFirewall() {
-    if systemctl status ufw 2>/dev/null | grep -q "active (exited)" && [[ "$1" == "stop" ]]; then
-        systemctl stop ufw >/dev/null 2>&1
-        systemctl disable ufw >/dev/null 2>&1
-        echoContent green " ---> ufw关闭成功"
-
-    fi
-
-    if systemctl status firewalld 2>/dev/null | grep -q "active (running)" && [[ "$1" == "stop" ]]; then
-        systemctl stop firewalld >/dev/null 2>&1
-        systemctl disable firewalld >/dev/null 2>&1
-        echoContent green " ---> firewalld关闭成功"
-    fi
-}
 
 # 安装BBR
 bbrInstall() {
@@ -7488,7 +7441,8 @@ bbrInstall() {
     echoContent red "=============================================================="
     read -r -p "请选择:" installBBRStatus
     if [[ "${installBBRStatus}" == "1" ]]; then
-        wget -O tcpx.sh "https://github.com/ylx2016/Linux-NetSpeed/raw/master/tcpx.sh" && chmod +x tcpx.sh && ./tcpx.sh
+        echoContent yellow "Use a reviewed OS package or configure BBR through your distribution."
+        return 1
     else
         menu
     fi
@@ -7603,14 +7557,12 @@ aliasInstall() {
                 vasmaType=true
             fi
 
-            rm -rf "$HOME/install.sh"
         elif [[ -d "/usr/sbin" ]]; then
             if [[ ! -f "/usr/sbin/vasma" ]]; then
                 ln -s /etc/v2ray-agent/install.sh /usr/sbin/vasma
                 chmod 700 /usr/sbin/vasma
                 vasmaType=true
             fi
-            rm -rf "$HOME/install.sh"
         fi
         if [[ "${vasmaType}" == "true" ]]; then
             echoContent green "快捷方式创建成功，可执行[vasma]重新打开脚本"
@@ -8325,8 +8277,16 @@ installSniffing() {
 
 # 读取第三方warp配置
 readConfigWarpReg() {
-    if [[ ! -f "/etc/v2ray-agent/warp/config" ]]; then
-        /etc/v2ray-agent/warp/warp-reg >/etc/v2ray-agent/warp/config
+    if [[ ! -s "/etc/v2ray-agent/warp/config" ]]; then
+        installWarpReg || return 1
+        local configTemp
+        configTemp=$(mktemp /etc/v2ray-agent/warp/.config.XXXXXX) || return 1
+        if ! /etc/v2ray-agent/warp/warp-reg >"${configTemp}" ||
+            ! grep -q '^private_key' "${configTemp}" ||
+            ! mv -f "${configTemp}" /etc/v2ray-agent/warp/config; then
+            rm -f -- "${configTemp}"
+            return 1
+        fi
     fi
 
     secretKeyWarpReg=$(grep <"/etc/v2ray-agent/warp/config" private_key | awk '{print $2}')
@@ -8340,23 +8300,9 @@ readConfigWarpReg() {
 }
 # 安装warp-reg工具
 installWarpReg() {
-    if [[ ! -f "/etc/v2ray-agent/warp/warp-reg" ]]; then
-        echo
-        echoContent yellow "# 注意事项"
-        echoContent yellow "# 依赖第三方程序，请熟知其中风险"
-        echoContent yellow "# 项目地址：https://github.com/badafans/warp-reg \n"
-
-        read -r -p "warp-reg未安装，是否安装 ？[y/n]:" installWarpRegStatus
-
-        if [[ "${installWarpRegStatus}" == "y" ]]; then
-
-            curl -sLo /etc/v2ray-agent/warp/warp-reg "https://github.com/badafans/warp-reg/releases/download/v1.0/${warpRegCoreCPUVendor}"
-            chmod 655 /etc/v2ray-agent/warp/warp-reg
-
-        else
-            echoContent yellow " ---> 放弃安装"
-            exit 0
-        fi
+    if [[ ! -x /etc/v2ray-agent/warp/warp-reg ]]; then
+        echoContent red "Install an independently verified executable at /etc/v2ray-agent/warp/warp-reg."
+        return 1
     fi
 }
 
@@ -8472,8 +8418,8 @@ warpRoutingReg() {
     echoContent yellow "4.卸载WARP分流"
     echoContent red "=============================================================="
     read -r -p "请选择:" warpStatus
-    installWarpReg
-    readConfigWarpReg
+    installWarpReg || return 1
+    readConfigWarpReg || return 1
     local address=
     if [[ ${type} == "IPv4" ]]; then
         address="172.16.0.2/32"
@@ -8504,7 +8450,7 @@ warpRoutingReg() {
         read -r -p "是否确认设置？[y/n]:" warpOutStatus
 
         if [[ "${warpOutStatus}" == "y" ]]; then
-            readConfigWarpReg
+            readConfigWarpReg || return 1
             if [[ "${coreInstallType}" == "1" ]]; then
                 addXrayOutbound "wireguard_out_${type}"
                 if [[ "${type}" == "IPv4" ]]; then
@@ -10508,7 +10454,7 @@ customSingBoxInstall() {
         installSingBoxService 5
         initSingBoxConfig custom 6 || return 1
         cleanUp xrayDel
-        installCronTLS 7
+        installCronTLS 7 || return 1
         handleSingBox stop
         handleSingBox start
         handleNginx stop || return 1
@@ -10636,7 +10582,7 @@ customXrayInstall() {
             cleanUp singBoxDel
         fi
         if xraySelectionNeedsCertificate "${selectCustomInstallType}"; then
-            installCronTLS 10
+            installCronTLS 10 || return 1
         fi
 
         handleXray stop
@@ -10712,7 +10658,7 @@ xrayCoreInstall() {
     installXrayService 7
     initXrayConfig all 8
     cleanUp singBoxDel
-    installCronTLS 9
+    installCronTLS 9 || return 1
     if [[ -n "${btDomain}" ]]; then
         echoContent skyBlue "\n进度  11/${totalProgress} : 检测到宝塔面板/1Panel，跳过伪装网站"
     else
@@ -10757,7 +10703,7 @@ singBoxInstall() {
     initSingBoxConfig all 7 || return 1
 
     cleanUp xrayDel
-    installCronTLS 8
+    installCronTLS 8 || return 1
 
     handleSingBox stop
     handleSingBox start
@@ -10989,7 +10935,7 @@ EOF
 }
 # 卸载订阅
 unInstallSubscribe() {
-    rm -rf ${nginxConfigPath}subscribe.conf >/dev/null 2>&1
+    rm -f ${nginxConfigPath}subscribe.conf >/dev/null 2>&1
 }
 
 # 添加订阅
@@ -11561,6 +11507,7 @@ subscribe() (
                 fi
                 if [[ -f "/etc/v2ray-agent/subscribe_local/sing-box/${email}" ]]; then
                     cp "/etc/v2ray-agent/subscribe_local/sing-box/${email}" "${subscribePublishPath}/sing-box_profiles/${emailMd5}" || return 1
+                    chmod 644 "${subscribePublishPath}/sing-box_profiles/${emailMd5}" || return 1
 
                     echoContent skyBlue " ---> 下载 sing-box 通用配置文件"
                     if [[ "${release}" == "alpine" ]]; then
@@ -11617,7 +11564,7 @@ subscribe() (
             cp -p "${saltPath}" "${saltBackup}" || return 1
             hadSalt=true
         fi
-        printf '%s\n' "${subscribeSalt}" >"${saltTemp}" || return 1
+        (umask 077; printf '%s\n' "${subscribeSalt}" >"${saltTemp}") || return 1
         if [[ -d "${publishedDir}" ]]; then
             hadPublished=true
         fi
@@ -12052,10 +11999,9 @@ manageReality() {
 
 # 安装reality scanner
 installRealityScanner() {
-    if [[ ! -f "/etc/v2ray-agent/xray/reality_scan/RealiTLScanner-linux-64" ]]; then
-        version=$(curl -s https://api.github.com/repos/XTLS/RealiTLScanner/releases?per_page=1 | jq -r '.[]|.tag_name')
-        wget -c -q -P /etc/v2ray-agent/xray/reality_scan/ "https://github.com/XTLS/RealiTLScanner/releases/download/${version}/RealiTLScanner-linux-64"
-        chmod 655 /etc/v2ray-agent/xray/reality_scan/RealiTLScanner-linux-64
+    if [[ ! -x /etc/v2ray-agent/xray/reality_scan/RealiTLScanner-linux-64 ]]; then
+        echoContent red "Install an independently verified executable at /etc/v2ray-agent/xray/reality_scan/RealiTLScanner-linux-64."
+        return 1
     fi
 }
 # reality scanner
@@ -12091,6 +12037,7 @@ realityScanner() {
 
     read -r -p "IP是否正确？[y/n]:" ipStatus
     if [[ "${ipStatus}" == "y" ]]; then
+        installRealityScanner || return 1
         echoContent yellow "结果存储在 /etc/v2ray-agent/xray/reality_scan/result.log 文件中\n"
         /etc/v2ray-agent/xray/reality_scan/RealiTLScanner-linux-64 -addr "${publicIP}" | tee /etc/v2ray-agent/xray/reality_scan/result.log
     else

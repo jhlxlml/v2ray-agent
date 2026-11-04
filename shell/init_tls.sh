@@ -80,7 +80,8 @@ installTools(){
     if [[ -z $(find ~/.acme.sh/ -name "acme.sh") ]]
     then
         echoColor yellow "\nacme.sh未安装，安装中\n"
-        curl -s https://get.acme.sh | sh >/dev/null
+        echoColor red "Install a reviewed acme.sh release in $HOME/.acme.sh first."
+        exit 1
         echoColor green "acme.sh安装完毕\n"
     else
         echoColor green "acme.sh已安装\n"

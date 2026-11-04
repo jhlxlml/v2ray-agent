@@ -113,16 +113,62 @@ jsonEscape() {
 
 # validateDataDirPath — reject obviously unsafe data-dir path forms (for root-run scenarios).
 validateDataDirPath() {
-    local path="$1"
-    if [[ -z "${path}" || "${path}" != /* || "${path}" == *:* ]]; then
-        echoContent "red" "--data-dir must be an absolute path without colons"
-        exit 1
-    fi
+    local path=${1%/} canonical parent owner mode
+    [[ "${path}" =~ ^/[a-zA-Z0-9._/-]+$ ]] || return 1
+    canonical=$(realpath -m -- "${path}") || return 1
+    [[ "${canonical}" == "${path}" && "${path}" == /*/* ]] || return 1
+    case "${path}" in
+        /etc/v2ray-agent/docker) ;;
+        /etc/*|/usr/*|/proc/*|/sys/*|/dev/*|/run/*|/boot/*|/bin/*|/sbin/*|/lib*/*|/var/lib/docker|/var/lib/docker/*|/var/lib|/var/log|/var/log/*)
+            return 1 ;;
+    esac
+    parent=${path}
+    while [[ -n "${parent}" ]]; do
+        [[ ! -L "${parent}" ]] || return 1
+        if [[ -e "${parent}" ]]; then
+            [[ -d "${parent}" ]] || return 1
+            read -r owner mode < <(stat -c '%u %a' -- "${parent}") || return 1
+            [[ "${owner}" == 0 || "${owner}" == "${EUID}" ]] || return 1
+            if (( (8#${mode} & 022) != 0 )); then
+                [[ "${parent}" != "${path}" ]] && (( (8#${mode} & 01000) != 0 )) || return 1
+            fi
+        fi
+        parent=${parent%/*}
+    done
+}
 
-    if [[ -e "${path}" && -L "${path}" ]]; then
-        echoContent "red" "--data-dir must not be a symbolic link: ${path}"
-        exit 1
+ownsDockerDataDir() {
+    local path=${1%/} marker
+    validateDataDirPath "${path}" || return 1
+    marker="${path}/.vasmad-owned"
+    [[ -f "${marker}" && ! -L "${marker}" ]] &&
+        [[ "$(stat -c '%u:%a:%h' -- "${marker}")" == "${EUID}:600:1" ]] &&
+        [[ "$(cat -- "${marker}")" == "vasmad clean.1 $(stat -c '%d:%i' -- "${path}") ${path}" ]]
+}
+
+prepareDockerDataDir() (
+    umask 077
+    local path=${1%/}
+    validateDataDirPath "${path}" || return 1
+    if ownsDockerDataDir "${path}"; then
+        return 0
     fi
+    mkdir -p -- "${path%/*}" || return 1
+    # An existing directory can only be adopted after the operator moves its contents away.
+    if [[ -d "${path}" ]]; then
+        rmdir -- "${path}" || return 1
+    fi
+    mkdir -m 700 -- "${path}" || return 1
+    printf 'vasmad clean.1 %s %s\n' "$(stat -c '%d:%i' -- "${path}")" "${path}" >"${path}/.vasmad-owned"
+)
+
+removeDockerDataDir() {
+    local path=${1%/}
+    ownsDockerDataDir "${path}" || return 1
+    # Bind mounts can share a device number with the parent, so check mount points explicitly.
+    [[ -r /proc/self/mountinfo ]] || return 1
+    awk -v path="${path}" '$5 == path || index($5, path "/") == 1 { found=1 } END { exit found }' /proc/self/mountinfo || return 1
+    rm -rf -- "${path}"
 }
 
 # ---------------------------------------------------------------------------
@@ -529,15 +575,17 @@ server {
 }
 EOF
 
-    docker pull "${nginxImage}" >/dev/null 2>&1 || true
+    docker pull "${nginxImage}" >/dev/null 2>&1 || return 1
     if docker ps -a --filter "name=^/${containerName}$" --format '{{.Names}}' | grep -q "^${containerName}$"; then
-        docker rm -f "${containerName}" >/dev/null 2>&1 || true
+        ownsDockerContainer "${containerName}" || return 1
+        docker rm -f "${containerName}" >/dev/null 2>&1 || return 1
     fi
     if ! docker run -d \
         --name "${containerName}" \
+        --label "org.v2ray-agent.data-dir=${dataDir%/}" \
         --restart unless-stopped \
         -p "${activePort}:80" \
-        -v "${dataDir%/}:/usr/share/nginx/html:ro" \
+        -v "${dataDir%/}/subscribe:/usr/share/nginx/html/subscribe:ro" \
         -v "${nginxConfig}:/etc/nginx/conf.d/default.conf:ro" \
         "${nginxImage}" >/dev/null; then
         echoContent "red" "Failed to start subscription access container"
@@ -672,7 +720,7 @@ parseCli() {
                 exit 1
             fi
             dataDir="$2"
-            validateDataDirPath "${dataDir}"
+            validateDataDirPath "${dataDir}" || { echoContent red "Unsafe --data-dir: ${dataDir}"; exit 1; }
             shift 2
             ;;
         --install-mode)
@@ -842,27 +890,6 @@ selfInstallShortcut() {
 # ---------------------------------------------------------------------------
 # installDocker — download and run the official Docker convenience install script
 # ---------------------------------------------------------------------------
-installDocker() {
-    echoContent "white" "Downloading Docker install script from https://get.docker.com ..."
-    local tmpScript
-    tmpScript="$(mktemp /tmp/get-docker-XXXXXX.sh)"
-    if ! curl -fsSL https://get.docker.com -o "${tmpScript}"; then
-        echoContent "red" "Failed to download Docker install script from https://get.docker.com"
-        rm -f "${tmpScript}"
-        return 1
-    fi
-    echoContent "white" "Running Docker install script..."
-    if ! sh "${tmpScript}"; then
-        echoContent "red" "Docker installation failed"
-        rm -f "${tmpScript}"
-        return 1
-    fi
-    rm -f "${tmpScript}"
-    echoContent "green" "Docker installed successfully"
-    return 0
-}
-
-# checkDocker — verify Docker is installed and running; prompt to install if missing
 checkDocker() {
     # QA override: V2RAY_AGENT_FORCE_NO_DOCKER=1 forces the Docker-missing branch
     if [[ "${forceNoDocker}" == "1" ]]; then
@@ -892,37 +919,8 @@ checkDocker() {
 
 # _promptDockerInstall — ask the user whether to install Docker; exit cleanly on refusal
 _promptDockerInstall() {
-    local answer
-    if [[ "${nonInteractive}" == "1" ]]; then
-        echoContent "red" "Docker is required but not installed. Use interactive mode, or set V2RAY_AGENT_FORCE_NO_DOCKER for QA only."
-        exit 1
-    fi
-
-    echoContent "yellow" "Docker is required to run this script."
-    answer="$(promptValue $'\033[33mInstall Docker now via https://get.docker.com? [y/N]: \033[0m' "")"
-    case "${answer}" in
-    [yY] | [yY][eE][sS])
-        if ! installDocker; then
-            echoContent "red" "Docker installation failed, exiting."
-            exit 1
-        fi
-        # Verify the daemon started after installation
-        if ! docker info >/dev/null 2>&1; then
-            echoContent "yellow" "Docker installed but daemon not yet running, starting..."
-            systemctl start docker 2>/dev/null || true
-            sleep 2
-            if ! docker info >/dev/null 2>&1; then
-                echoContent "red" "Docker daemon failed to start. Please start it manually and retry."
-                exit 1
-            fi
-        fi
-        echoContent "green" "Docker is ready"
-        ;;
-    *)
-        echoContent "white" "Docker installation declined, exiting."
-        exit 0
-        ;;
-    esac
+    echoContent red "Install Docker from your approved package repository, then retry."
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -944,7 +942,7 @@ xrayImagePreflight() {
     fi
 
     echoContent "white" "Pulling Xray image ${xrayImage} (if not cached)..."
-    docker pull "${xrayImage}" >/dev/null 2>&1 || true
+    docker pull "${xrayImage}" >/dev/null 2>&1 || return 1
 
     echoContent "white" "Validating config: docker run --rm --user root -v \"${configFile}:/usr/local/etc/xray/config.json:ro\" ${xrayImage} run -test -c /usr/local/etc/xray/config.json"
     if docker run --rm \
@@ -1527,6 +1525,12 @@ hasPersistedConfig() {
 }
 
 # hasManagedContainer — check whether the target Docker container exists (running or stopped).
+ownsDockerContainer() {
+    local name=$1 label
+    label=$(docker inspect --format '{{ index .Config.Labels "org.v2ray-agent.data-dir" }}' "${name}") || return 1
+    [[ "${label}" == "${dataDir%/}" ]]
+}
+
 hasManagedContainer() {
     docker ps -a --filter "name=^/v2ray-agent-docker$" --format '{{.Names}}' 2>/dev/null | grep -q '^v2ray-agent-docker$'
 }
@@ -1589,20 +1593,24 @@ uninstallDockerReality() {
         ;;
     esac
 
+    ownsDockerDataDir "${dataDir}" || { echoContent red "Unverified Docker data directory: ${dataDir}"; return 1; }
+
     if hasManagedContainer; then
-        docker rm -f v2ray-agent-docker >/dev/null 2>&1 || true
+        ownsDockerContainer v2ray-agent-docker || return 1
+        docker rm -f v2ray-agent-docker >/dev/null 2>&1 || return 1
         echoContent "green" " ---> Docker container removed"
     fi
     if docker ps -a --filter "name=^/v2ray-agent-docker-subscribe$" --format '{{.Names}}' 2>/dev/null | grep -q '^v2ray-agent-docker-subscribe$'; then
-        docker rm -f v2ray-agent-docker-subscribe >/dev/null 2>&1 || true
+        ownsDockerContainer v2ray-agent-docker-subscribe || return 1
+        docker rm -f v2ray-agent-docker-subscribe >/dev/null 2>&1 || return 1
         echoContent "green" " ---> Subscription access container removed"
     fi
 
-    rm -rf "${dataDir%/}" >/dev/null 2>&1 || true
+    removeDockerDataDir "${dataDir}" || return 1
     echoContent "green" " ---> Docker Reality data directory removed"
 
-    rm -rf /usr/bin/vasmad >/dev/null 2>&1 || true
-    rm -rf /usr/sbin/vasmad >/dev/null 2>&1 || true
+    rm -f /usr/bin/vasmad >/dev/null 2>&1 || true
+    rm -f /usr/sbin/vasmad >/dev/null 2>&1 || true
     echoContent "green" " ---> Shortcut removed"
 
     if [[ -f "${installedScript}" ]]; then
@@ -1825,6 +1833,7 @@ showEnglishSubscriptionSection() {
     fi
 
     mkdir -p "${dataDir%/}/subscribe_local/default" "${dataDir%/}/subscribe_local/clashMeta" "${dataDir%/}/subscribe/default" "${dataDir%/}/subscribe/clashMeta" "${dataDir%/}/subscribe/clashMetaProfiles"
+    [[ "${subscribeName}" =~ ^[a-zA-Z0-9_.@]+$ && "${subscribeName}" != "." && "${subscribeName}" != ".." ]] || return 1
     defaultLocalFile="${dataDir%/}/subscribe_local/default/${subscribeName}"
     clashLocalFile="${dataDir%/}/subscribe_local/clashMeta/${subscribeName}"
     : >"${defaultLocalFile}"
@@ -1857,8 +1866,11 @@ showEnglishSubscriptionSection() {
     defaultPublicFile="${dataDir%/}/subscribe/default/${emailMd5}"
     base64FileSingleLine "${defaultLocalFile}" >"${defaultPublicFile}"
 
-    startSubscribeContainer "${displayAddress}"
-    subscribeDomain="${displayAddress}:${persistedSubscribePort:-${resolvedSubscribePort}}"
+    local subscribeAddress=${displayAddress}
+    if [[ "${subscribeAddress}" == *:* && "${subscribeAddress}" != \[*\] ]]; then
+        subscribeAddress="[${subscribeAddress}]"
+    fi
+    subscribeDomain="${subscribeAddress}:${persistedSubscribePort:-${resolvedSubscribePort}}"
     subscribeURL="http://${subscribeDomain}/s/default/${emailMd5}"
     if [[ -s "${clashLocalFile}" ]]; then
         clashPublicFile="${dataDir%/}/subscribe/clashMeta/${emailMd5}"
@@ -1869,6 +1881,13 @@ showEnglishSubscriptionSection() {
         cat "${clashLocalFile}" >>"${clashPublicFile}"
         writeClashMetaProfile "${clashProfileFile}" "${clashProxyURL}" "${subscribeSalt}_provider"
     fi
+
+    chmod 755 "${dataDir%/}/subscribe" "${dataDir%/}/subscribe/"{default,clashMeta,clashMetaProfiles} || return 1
+    chmod 644 "${defaultPublicFile}" || return 1
+    if [[ -n "${clashPublicFile}" ]]; then
+        chmod 644 "${clashPublicFile}" "${clashProfileFile}" || return 1
+    fi
+    startSubscribeContainer "${displayAddress}" || return 1
 
     echoContent "skyBlue" "============================= Default subscription =============================="
     echoContent "white" "Plain HTTP subscription transport can expose UUID, Reality parameters, SNI, path, ports, and connection details."
@@ -2107,24 +2126,15 @@ generateConfig() {
     echoContent "white" "Generating Reality config in ${dataDir} ..."
     resolveValues
 
-    # Create the data directory; exit cleanly if the path cannot be created
-    if ! mkdir -p "${dataDir}" 2>/dev/null; then
-        echoContent "red" "Failed to create data directory: ${dataDir}"
-        echoContent "red" "Check that the parent path exists and is a directory, not a regular file"
-        exit 1
-    fi
+    prepareDockerDataDir "${dataDir}" || {
+        echoContent red "Cannot claim Docker data directory: ${dataDir}"
+        return 1
+    }
 
     local configFile="${dataDir}/config.json"
     local summaryFile="${dataDir}/client-summary.txt"
-
-    # Remove stale directory remnants left by previous failed runs
-    if [[ -d "${configFile}" ]]; then
-        echoContent "yellow" "Removing stale directory at ${configFile} left by a previous failed run"
-        rm -rf "${configFile}" 2>/dev/null || { echoContent "red" "Cannot remove stale directory: ${configFile}"; exit 1; }
-    fi
-    if [[ -d "${summaryFile}" ]]; then
-        echoContent "yellow" "Removing stale directory at ${summaryFile} left by a previous failed run"
-        rm -rf "${summaryFile}" 2>/dev/null || { echoContent "red" "Cannot remove stale directory: ${summaryFile}"; exit 1; }
+    if [[ -L "${configFile}" || -d "${configFile}" || -L "${summaryFile}" || -d "${summaryFile}" ]]; then
+        return 1
     fi
 
     local renderedXHTTPPath=""
@@ -2270,6 +2280,7 @@ startContainer() {
     # Strip trailing slash for consistent path concatenation
     dataDir="${dataDir%/}"
 
+    ownsDockerDataDir "${dataDir}" || return 1
     local configFile="${dataDir}/config.json"
 
     # Verify the config file exists before attempting anything
@@ -2281,12 +2292,12 @@ startContainer() {
 
     # --- Validate config using directory mount ---
     echoContent "white" "Pulling Xray image ${xrayImage} (if not cached)..."
-    docker pull "${xrayImage}" >/dev/null 2>&1 || true
+    docker pull "${xrayImage}" >/dev/null 2>&1 || return 1
 
     echoContent "white" "Validating config with Xray image (directory mount)..."
     if ! docker run --rm \
         --user root \
-        -v "${dataDir}:/usr/local/etc/xray:ro" \
+        -v "${configFile}:/usr/local/etc/xray/config.json:ro" \
         "${xrayImage}" \
         run -test -c /usr/local/etc/xray/config.json; then
         echoContent "red" "Xray config validation failed — container will not be started"
@@ -2297,7 +2308,8 @@ startContainer() {
     # --- Remove any existing container with the same name to avoid name conflicts ---
     if docker ps -a --filter "name=^/${containerName}$" --format '{{.Names}}' | grep -q "^${containerName}$"; then
         echoContent "yellow" "Removing existing container: ${containerName}"
-        docker rm -f "${containerName}" >/dev/null 2>&1 || true
+        ownsDockerContainer "${containerName}" || return 1
+        docker rm -f "${containerName}" >/dev/null 2>&1 || return 1
     fi
 
     # --- Determine the port list to publish ---
@@ -2331,10 +2343,11 @@ startContainer() {
     echoContent "white" "Starting container ${containerName} (ports: ${portArgs[*]})..."
     if ! docker run -d \
         --name "${containerName}" \
+        --label "org.v2ray-agent.data-dir=${dataDir%/}" \
         --restart unless-stopped \
         --user root \
         "${portArgs[@]}" \
-        -v "${dataDir}:/usr/local/etc/xray:ro" \
+        -v "${configFile}:/usr/local/etc/xray/config.json:ro" \
         "${xrayImage}" \
         run -c /usr/local/etc/xray/config.json; then
         echoContent "red" "Failed to start container ${containerName}"
@@ -2423,7 +2436,9 @@ showClientInfo() {
 # main — top-level flow
 # ---------------------------------------------------------------------------
 main() {
+    umask 077
     parseCli "$@"
+    validateDataDirPath "${dataDir}" || { echoContent red "Unsafe --data-dir: ${dataDir}"; return 1; }
 
     if [[ "${generateOnly}" == "1" && "${startOnly}" == "1" ]]; then
         echoContent "red" "--generate-only and --start-only are mutually exclusive"
@@ -2432,16 +2447,16 @@ main() {
 
     checkEnvironment
     selfInstallShortcut
-    checkDocker
+    checkDocker || return 1
     promptExistingInstallAction
     promptInteractiveValues
 
     if [[ "${startOnly}" != "1" ]]; then
-        generateConfig
+        generateConfig || return 1
     fi
 
     if [[ "${generateOnly}" != "1" ]]; then
-        startContainer
+        startContainer || return 1
         showClientInfo
     fi
 }

@@ -113,16 +113,62 @@ jsonEscape() {
 
 # validateDataDirPath — 拒绝明显不安全的 data-dir 路径形式（用于 root 运行场景）。
 validateDataDirPath() {
-    local path="$1"
-    if [[ -z "${path}" || "${path}" != /* || "${path}" == *:* ]]; then
-        echoContent "red" "--data-dir 必须是不含冒号的绝对路径"
-        exit 1
-    fi
+    local path=${1%/} canonical parent owner mode
+    [[ "${path}" =~ ^/[a-zA-Z0-9._/-]+$ ]] || return 1
+    canonical=$(realpath -m -- "${path}") || return 1
+    [[ "${canonical}" == "${path}" && "${path}" == /*/* ]] || return 1
+    case "${path}" in
+        /etc/v2ray-agent/docker) ;;
+        /etc/*|/usr/*|/proc/*|/sys/*|/dev/*|/run/*|/boot/*|/bin/*|/sbin/*|/lib*/*|/var/lib/docker|/var/lib/docker/*|/var/lib|/var/log|/var/log/*)
+            return 1 ;;
+    esac
+    parent=${path}
+    while [[ -n "${parent}" ]]; do
+        [[ ! -L "${parent}" ]] || return 1
+        if [[ -e "${parent}" ]]; then
+            [[ -d "${parent}" ]] || return 1
+            read -r owner mode < <(stat -c '%u %a' -- "${parent}") || return 1
+            [[ "${owner}" == 0 || "${owner}" == "${EUID}" ]] || return 1
+            if (( (8#${mode} & 022) != 0 )); then
+                [[ "${parent}" != "${path}" ]] && (( (8#${mode} & 01000) != 0 )) || return 1
+            fi
+        fi
+        parent=${parent%/*}
+    done
+}
 
-    if [[ -e "${path}" && -L "${path}" ]]; then
-        echoContent "red" "--data-dir 不能是符号链接：${path}"
-        exit 1
+ownsDockerDataDir() {
+    local path=${1%/} marker
+    validateDataDirPath "${path}" || return 1
+    marker="${path}/.vasmad-owned"
+    [[ -f "${marker}" && ! -L "${marker}" ]] &&
+        [[ "$(stat -c '%u:%a:%h' -- "${marker}")" == "${EUID}:600:1" ]] &&
+        [[ "$(cat -- "${marker}")" == "vasmad clean.1 $(stat -c '%d:%i' -- "${path}") ${path}" ]]
+}
+
+prepareDockerDataDir() (
+    umask 077
+    local path=${1%/}
+    validateDataDirPath "${path}" || return 1
+    if ownsDockerDataDir "${path}"; then
+        return 0
     fi
+    mkdir -p -- "${path%/*}" || return 1
+    # An existing directory can only be adopted after the operator moves its contents away.
+    if [[ -d "${path}" ]]; then
+        rmdir -- "${path}" || return 1
+    fi
+    mkdir -m 700 -- "${path}" || return 1
+    printf 'vasmad clean.1 %s %s\n' "$(stat -c '%d:%i' -- "${path}")" "${path}" >"${path}/.vasmad-owned"
+)
+
+removeDockerDataDir() {
+    local path=${1%/}
+    ownsDockerDataDir "${path}" || return 1
+    # Bind mounts can share a device number with the parent, so check mount points explicitly.
+    [[ -r /proc/self/mountinfo ]] || return 1
+    awk -v path="${path}" '$5 == path || index($5, path "/") == 1 { found=1 } END { exit found }' /proc/self/mountinfo || return 1
+    rm -rf -- "${path}"
 }
 
 # ---------------------------------------------------------------------------
@@ -531,15 +577,17 @@ server {
 }
 EOF
 
-    docker pull "${nginxImage}" >/dev/null 2>&1 || true
+    docker pull "${nginxImage}" >/dev/null 2>&1 || return 1
     if docker ps -a --filter "name=^/${containerName}$" --format '{{.Names}}' | grep -q "^${containerName}$"; then
-        docker rm -f "${containerName}" >/dev/null 2>&1 || true
+        ownsDockerContainer "${containerName}" || return 1
+        docker rm -f "${containerName}" >/dev/null 2>&1 || return 1
     fi
     if ! docker run -d \
         --name "${containerName}" \
+        --label "org.v2ray-agent.data-dir=${dataDir%/}" \
         --restart unless-stopped \
         -p "${activePort}:80" \
-        -v "${dataDir%/}:/usr/share/nginx/html:ro" \
+        -v "${dataDir%/}/subscribe:/usr/share/nginx/html/subscribe:ro" \
         -v "${nginxConfig}:/etc/nginx/conf.d/default.conf:ro" \
         "${nginxImage}" >/dev/null; then
         echoContent "red" "启动订阅访问容器失败"
@@ -673,7 +721,7 @@ parseCli() {
                 exit 1
             fi
             dataDir="$2"
-            validateDataDirPath "${dataDir}"
+            validateDataDirPath "${dataDir}" || { echoContent red "Unsafe --data-dir: ${dataDir}"; exit 1; }
             shift 2
             ;;
         --install-mode)
@@ -843,27 +891,6 @@ selfInstallShortcut() {
 # ---------------------------------------------------------------------------
 # installDocker — 下载并运行 Docker 官方便捷安装脚本
 # ---------------------------------------------------------------------------
-installDocker() {
-    echoContent "white" "正在从 https://get.docker.com 下载 Docker 安装脚本..."
-    local tmpScript
-    tmpScript="$(mktemp /tmp/get-docker-XXXXXX.sh)"
-    if ! curl -fsSL https://get.docker.com -o "${tmpScript}"; then
-        echoContent "red" "从 https://get.docker.com 下载 Docker 安装脚本失败"
-        rm -f "${tmpScript}"
-        return 1
-    fi
-    echoContent "white" "正在运行 Docker 安装脚本..."
-    if ! sh "${tmpScript}"; then
-        echoContent "red" "Docker 安装失败"
-        rm -f "${tmpScript}"
-        return 1
-    fi
-    rm -f "${tmpScript}"
-    echoContent "green" "Docker 安装成功"
-    return 0
-}
-
-# checkDocker — 验证 Docker 是否已安装并正在运行；若未安装则提示安装
 checkDocker() {
     # QA 覆盖：V2RAY_AGENT_FORCE_NO_DOCKER=1 强制进入 Docker 缺失分支
     if [[ "${forceNoDocker}" == "1" ]]; then
@@ -893,37 +920,8 @@ checkDocker() {
 
 # _promptDockerInstall — 询问用户是否安装 Docker；拒绝时干净退出
 _promptDockerInstall() {
-    local answer
-    if [[ "${nonInteractive}" == "1" ]]; then
-        echoContent "red" "Docker 是必需的但未安装。请使用交互模式，或仅在 QA 中设置 V2RAY_AGENT_FORCE_NO_DOCKER。"
-        exit 1
-    fi
-
-    echoContent "yellow" "运行本脚本需要 Docker。"
-    answer="$(promptValue $'\033[33m是否通过 https://get.docker.com 立即安装 Docker？[y/N]：\033[0m' "")"
-    case "${answer}" in
-    [yY] | [yY][eE][sS])
-        if ! installDocker; then
-            echoContent "red" "Docker 安装失败，正在退出。"
-            exit 1
-        fi
-        # 安装后验证守护进程是否已启动
-        if ! docker info >/dev/null 2>&1; then
-            echoContent "yellow" "Docker 已安装但守护进程尚未运行，正在启动..."
-            systemctl start docker 2>/dev/null || true
-            sleep 2
-            if ! docker info >/dev/null 2>&1; then
-                echoContent "red" "Docker 守护进程未能启动，请手动启动后重试。"
-                exit 1
-            fi
-        fi
-        echoContent "green" "Docker 已就绪"
-        ;;
-    *)
-        echoContent "white" "已拒绝安装 Docker，正在退出。"
-        exit 0
-        ;;
-    esac
+    echoContent red "Install Docker from your approved package repository, then retry."
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -945,7 +943,7 @@ xrayImagePreflight() {
     fi
 
     echoContent "white" "正在拉取 Xray 镜像 ${xrayImage}（如未缓存）..."
-    docker pull "${xrayImage}" >/dev/null 2>&1 || true
+    docker pull "${xrayImage}" >/dev/null 2>&1 || return 1
 
     echoContent "white" "正在验证配置：docker run --rm --user root -v \"${configFile}:/usr/local/etc/xray/config.json:ro\" ${xrayImage} run -test -c /usr/local/etc/xray/config.json"
     if docker run --rm \
@@ -1536,6 +1534,12 @@ hasPersistedConfig() {
 }
 
 # hasManagedContainer — 判断目标 Docker 容器是否存在（运行中或已停止均算存在）。
+ownsDockerContainer() {
+    local name=$1 label
+    label=$(docker inspect --format '{{ index .Config.Labels "org.v2ray-agent.data-dir" }}' "${name}") || return 1
+    [[ "${label}" == "${dataDir%/}" ]]
+}
+
 hasManagedContainer() {
     docker ps -a --filter "name=^/v2ray-agent-docker$" --format '{{.Names}}' 2>/dev/null | grep -q '^v2ray-agent-docker$'
 }
@@ -1598,20 +1602,24 @@ uninstallDockerReality() {
         ;;
     esac
 
+    ownsDockerDataDir "${dataDir}" || { echoContent red "Unverified Docker data directory: ${dataDir}"; return 1; }
+
     if hasManagedContainer; then
-        docker rm -f v2ray-agent-docker >/dev/null 2>&1 || true
+        ownsDockerContainer v2ray-agent-docker || return 1
+        docker rm -f v2ray-agent-docker >/dev/null 2>&1 || return 1
         echoContent "green" " ---> 删除 Docker 容器完成"
     fi
     if docker ps -a --filter "name=^/v2ray-agent-docker-subscribe$" --format '{{.Names}}' 2>/dev/null | grep -q '^v2ray-agent-docker-subscribe$'; then
-        docker rm -f v2ray-agent-docker-subscribe >/dev/null 2>&1 || true
+        ownsDockerContainer v2ray-agent-docker-subscribe || return 1
+        docker rm -f v2ray-agent-docker-subscribe >/dev/null 2>&1 || return 1
         echoContent "green" " ---> 删除订阅访问容器完成"
     fi
 
-    rm -rf "${dataDir%/}" >/dev/null 2>&1 || true
+    removeDockerDataDir "${dataDir}" || return 1
     echoContent "green" " ---> 删除 Docker Reality 配置目录完成"
 
-    rm -rf /usr/bin/vasmad >/dev/null 2>&1 || true
-    rm -rf /usr/sbin/vasmad >/dev/null 2>&1 || true
+    rm -f /usr/bin/vasmad >/dev/null 2>&1 || true
+    rm -f /usr/sbin/vasmad >/dev/null 2>&1 || true
     echoContent "green" " ---> 卸载快捷方式完成"
 
     if [[ -f "${installedScript}" ]]; then
@@ -1839,6 +1847,7 @@ showChineseSubscriptionSection() {
     fi
 
     mkdir -p "${dataDir%/}/subscribe_local/default" "${dataDir%/}/subscribe_local/clashMeta" "${dataDir%/}/subscribe/default" "${dataDir%/}/subscribe/clashMeta" "${dataDir%/}/subscribe/clashMetaProfiles"
+    [[ "${subscribeName}" =~ ^[a-zA-Z0-9_.@]+$ && "${subscribeName}" != "." && "${subscribeName}" != ".." ]] || return 1
     defaultLocalFile="${dataDir%/}/subscribe_local/default/${subscribeName}"
     clashLocalFile="${dataDir%/}/subscribe_local/clashMeta/${subscribeName}"
     : >"${defaultLocalFile}"
@@ -1871,8 +1880,11 @@ showChineseSubscriptionSection() {
     defaultPublicFile="${dataDir%/}/subscribe/default/${emailMd5}"
     base64FileSingleLine "${defaultLocalFile}" >"${defaultPublicFile}"
 
-    startSubscribeContainer "${displayAddress}"
-    subscribeDomain="${displayAddress}:${persistedSubscribePort:-${resolvedSubscribePort}}"
+    local subscribeAddress=${displayAddress}
+    if [[ "${subscribeAddress}" == *:* && "${subscribeAddress}" != \[*\] ]]; then
+        subscribeAddress="[${subscribeAddress}]"
+    fi
+    subscribeDomain="${subscribeAddress}:${persistedSubscribePort:-${resolvedSubscribePort}}"
     subscribeURL="http://${subscribeDomain}/s/default/${emailMd5}"
     if [[ -s "${clashLocalFile}" ]]; then
         clashPublicFile="${dataDir%/}/subscribe/clashMeta/${emailMd5}"
@@ -1883,6 +1895,13 @@ showChineseSubscriptionSection() {
         cat "${clashLocalFile}" >>"${clashPublicFile}"
         writeClashMetaProfile "${clashProfileFile}" "${clashProxyURL}" "${subscribeSalt}_provider"
     fi
+
+    chmod 755 "${dataDir%/}/subscribe" "${dataDir%/}/subscribe/"{default,clashMeta,clashMetaProfiles} || return 1
+    chmod 644 "${defaultPublicFile}" || return 1
+    if [[ -n "${clashPublicFile}" ]]; then
+        chmod 644 "${clashPublicFile}" "${clashProfileFile}" || return 1
+    fi
+    startSubscribeContainer "${displayAddress}" || return 1
 
     echoContent "skyBlue" "============================= 默认订阅 =============================="
     echoContent "white" "HTTP 明文订阅有风险，可能暴露 订阅信息。"
@@ -2125,30 +2144,15 @@ generateConfig() {
     echoContent "white" "正在 ${dataDir} 中生成 Reality 配置..."
     resolveValues
 
-    # 创建数据目录；若路径无法创建则干净退出
-    if ! mkdir -p "${dataDir}" 2>/dev/null; then
-        echoContent "red" "创建数据目录失败：${dataDir}"
-        echoContent "red" "请检查父路径是否存在且为目录而非普通文件"
-        exit 1
-    fi
+    prepareDockerDataDir "${dataDir}" || {
+        echoContent red "Cannot claim Docker data directory: ${dataDir}"
+        return 1
+    }
 
     local configFile="${dataDir}/config.json"
     local summaryFile="${dataDir}/client-summary.txt"
-
-    # 清除由之前失败运行留下的陈旧目录残留
-    if [[ -d "${configFile}" ]]; then
-        echoContent "yellow" "正在清除 ${configFile} 处由之前失败运行留下的陈旧目录"
-        rm -rf "${configFile}" 2>/dev/null || {
-            echoContent "red" "无法清除陈旧目录：${configFile}"
-            exit 1
-        }
-    fi
-    if [[ -d "${summaryFile}" ]]; then
-        echoContent "yellow" "正在清除 ${summaryFile} 处由之前失败运行留下的陈旧目录"
-        rm -rf "${summaryFile}" 2>/dev/null || {
-            echoContent "red" "无法清除陈旧目录：${summaryFile}"
-            exit 1
-        }
+    if [[ -L "${configFile}" || -d "${configFile}" || -L "${summaryFile}" || -d "${summaryFile}" ]]; then
+        return 1
     fi
 
     local renderedXHTTPPath=""
@@ -2296,6 +2300,7 @@ startContainer() {
     # 去除末尾斜杠，使路径拼接一致
     dataDir="${dataDir%/}"
 
+    ownsDockerDataDir "${dataDir}" || return 1
     local configFile="${dataDir}/config.json"
 
     # 在尝试任何操作前验证配置文件是否存在
@@ -2307,12 +2312,12 @@ startContainer() {
 
     # --- 使用目录挂载验证配置 ---
     echoContent "white" "正在拉取 Xray 镜像 ${xrayImage}"
-    docker pull "${xrayImage}" >/dev/null 2>&1 || true
+    docker pull "${xrayImage}" >/dev/null 2>&1 || return 1
 
     echoContent "white" "正在使用 Xray 镜像验证配置（目录挂载方式）..."
     if ! docker run --rm \
         --user root \
-        -v "${dataDir}:/usr/local/etc/xray:ro" \
+        -v "${configFile}:/usr/local/etc/xray/config.json:ro" \
         "${xrayImage}" \
         run -test -c /usr/local/etc/xray/config.json; then
         echoContent "red" "Xray 配置验证失败 — 容器将不会启动"
@@ -2323,7 +2328,8 @@ startContainer() {
     # --- 删除同名的已有容器以避免名称冲突 ---
     if docker ps -a --filter "name=^/${containerName}$" --format '{{.Names}}' | grep -q "^${containerName}$"; then
         echoContent "yellow" "正在删除已有容器：${containerName}"
-        docker rm -f "${containerName}" >/dev/null 2>&1 || true
+        ownsDockerContainer "${containerName}" || return 1
+        docker rm -f "${containerName}" >/dev/null 2>&1 || return 1
     fi
 
     # --- 确定需要发布的端口列表 ---
@@ -2357,10 +2363,11 @@ startContainer() {
     echoContent "white" "正在启动容器 ${containerName}（端口：${portArgs[*]})..."
     if ! docker run -d \
         --name "${containerName}" \
+        --label "org.v2ray-agent.data-dir=${dataDir%/}" \
         --restart unless-stopped \
         --user root \
         "${portArgs[@]}" \
-        -v "${dataDir}:/usr/local/etc/xray:ro" \
+        -v "${configFile}:/usr/local/etc/xray/config.json:ro" \
         "${xrayImage}" \
         run -c /usr/local/etc/xray/config.json; then
         echoContent "red" "启动容器 ${containerName} 失败"
@@ -2450,7 +2457,9 @@ showClientInfo() {
 # main — 顶层流程
 # ---------------------------------------------------------------------------
 main() {
+    umask 077
     parseCli "$@"
+    validateDataDirPath "${dataDir}" || { echoContent red "Unsafe --data-dir: ${dataDir}"; return 1; }
 
     if [[ "${generateOnly}" == "1" && "${startOnly}" == "1" ]]; then
         echoContent "red" "--generate-only 与 --start-only 互斥，不能同时使用"
@@ -2459,16 +2468,16 @@ main() {
 
     checkEnvironment
     selfInstallShortcut
-    checkDocker
+    checkDocker || return 1
     promptExistingInstallAction
     promptInteractiveValues
 
     if [[ "${startOnly}" != "1" ]]; then
-        generateConfig
+        generateConfig || return 1
     fi
 
     if [[ "${generateOnly}" != "1" ]]; then
-        startContainer
+        startContainer || return 1
         showClientInfo
     fi
 }
