@@ -203,17 +203,25 @@ renderXHTTPPath() {
 }
 
 urlEncode() {
-    local input="$1"
-    local length=${#input}
-    local index char
-
-    for ((index = 0; index < length; index++)); do
+    local LC_ALL=C
+    local input="$1" index char
+    for ((index = 0; index < ${#input}; index++)); do
         char="${input:index:1}"
         case "${char}" in
-        [a-zA-Z0-9.~_-]) printf '%s' "${char}" ;;
-        *) printf '%%%02X' "'${char}" ;;
+            [a-zA-Z0-9.~_-]) printf '%s' "${char}" ;;
+            *) printf '%%%02X' "'${char}" ;;
         esac
     done
+}
+
+showLocalQR() {
+    if command -v qrencode >/dev/null 2>&1; then
+        if ! printf '%s' "$1" | qrencode -t ANSIUTF8; then
+            printf '%s\n' "$1"
+        fi
+    else
+        printf '%s\n' 'Install qrencode for terminal QR codes. Connection link:' "$1"
+    fi
 }
 
 buildVisionSubscriptionLink() {
@@ -229,6 +237,10 @@ buildVisionSubscriptionLink() {
         return 1
     fi
 
+    if [[ "${displayAddress}" == *:* && "${displayAddress}" != \[*\] ]]; then
+        displayAddress="[${displayAddress}]"
+    fi
+
     printf 'vless://%s@%s:%s?encryption=none&security=reality&type=tcp&sni=%s&fp=chrome&pbk=%s&sid=%s&flow=xtls-rprx-vision#%s' \
         "${displayUUID}" \
         "${displayAddress}" \
@@ -236,7 +248,7 @@ buildVisionSubscriptionLink() {
         "${displayServerName}" \
         "${displayPublicKey}" \
         "${displayShortId}" \
-        "${displayEmail}"
+        "$(urlEncode "${displayEmail}")"
 }
 
 buildXHTTPSubscriptionLink() {
@@ -253,16 +265,20 @@ buildXHTTPSubscriptionLink() {
         return 1
     fi
 
+    if [[ "${displayAddress}" == *:* && "${displayAddress}" != \[*\] ]]; then
+        displayAddress="[${displayAddress}]"
+    fi
+
     printf 'vless://%s@%s:%s?encryption=none&security=reality&type=xhttp&sni=%s&host=%s&fp=chrome&path=%s&pbk=%s&sid=%s#%s' \
         "${displayUUID}" \
         "${displayAddress}" \
         "${displayPort}" \
         "${displayServerName}" \
         "${displayServerName}" \
-        "${displayPath}" \
+        "$(urlEncode "${displayPath}")" \
         "${displayPublicKey}" \
         "${displayShortId}" \
-        "${displayEmail}"
+        "$(urlEncode "${displayEmail}")"
 }
 
 buildXHTTPDefaultSubscriptionLink() {
@@ -1347,23 +1363,33 @@ loadPersistedPort() {
 
 # getPublicIP — try to resolve the current host's public IP for account display output.
 getPublicIP() {
-    local currentIP=""
-
-    if command -v curl >/dev/null 2>&1; then
-        currentIP=$(curl -fsS -4 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep '^ip=' | awk -F '=' '{print $2}')
-        if [[ -z "${currentIP}" ]]; then
-            currentIP=$(curl -fsS -6 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep '^ip=' | awk -F '=' '{print $2}')
-        fi
-        if [[ -z "${currentIP}" ]]; then
-            currentIP=$(curl -fsS https://api.ipify.org 2>/dev/null || true)
-        fi
+    local family=${1:-4} address
+    case "${family}" in
+        4) address=${VASMA_PUBLIC_IPV4:-} ;;
+        6) address=${VASMA_PUBLIC_IPV6:-} ;;
+        *) return 1 ;;
+    esac
+    if [[ -z "${1:-}" ]]; then
+        address=${VASMA_PUBLIC_IPV4:-${VASMA_PUBLIC_IPV6:-}}
+    fi
+    if [[ -n "${address}" ]]; then
+        printf '%s\n' "${address}"
+        return
+    fi
+    if [[ "${VASMA_DISABLE_IP_LOOKUP:-0}" == 1 ]]; then
+        return 0
     fi
 
-    if [[ -z "${currentIP}" ]]; then
-        currentIP=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
+    local endpoint=https://www.cloudflare.com/cdn-cgi/trace
+    printf '%s %s\n' 'Public IP lookup via' "${endpoint}" >&2
+    address=$(curl -fsS --max-time 4 "-${family}" "${endpoint}" | sed -n 's/^ip=//p')
+    if [[ -z "${address}" && -z "${1:-}" ]]; then
+        address=$(curl -fsS --max-time 4 -6 "${endpoint}" | sed -n 's/^ip=//p')
     fi
-
-    printf '%s' "${currentIP}"
+    if [[ -z "${address}" ]]; then
+        address=$(hostname -I 2>/dev/null | awk '{print $1}')
+    fi
+    printf '%s\n' "${address}"
 }
 
 # loadPersistedAccountInfo — restore account fields needed for display from summary (preferred) or config.json.
@@ -1695,7 +1721,7 @@ showVisionAccount() {
     local displayUUID="$5"
     local displayEmail="$6"
     local displayShortId="$7"
-    local vlessLink qrData qrLink
+    local vlessLink
 
     if [[ -z "${displayAddress}" ]]; then
         displayAddress="YOUR_SERVER_IP"
@@ -1706,14 +1732,6 @@ showVisionAccount() {
         echoContent "yellow" " ---> Vision account data is incomplete; skipping subscription link output"
         return 0
     fi
-    qrData="${vlessLink//:/%3A}"
-    qrData="${qrData//\//%2F}"
-    qrData="${qrData//@/%40}"
-    qrData="${qrData//\?/%3F}"
-    qrData="${qrData//&/%26}"
-    qrData="${qrData//#/%23}"
-    qrData="${qrData//=/%3D}"
-    qrLink="https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${qrData}"
 
     echoContent "skyBlue" "============================= VLESS Reality Vision [Recommended] =============================="
     echoContent "skyBlue" ""
@@ -1726,7 +1744,7 @@ showVisionAccount() {
     echoContent "green" "Protocol: VLESS reality, Address: ${displayAddress}, publicKey: ${displayPublicKey}, shortId: ${displayShortId}, serverNames: ${displayServerName}, Port: ${displayPort}, UserID: ${displayUUID}, Transport: tcp, Account: ${displayEmail}"
     echoContent "white" ""
     echoContent "yellow" " ---> QR Code VLESS (VLESS+reality+uTLS+Vision)"
-    echoContent "green" "    ${qrLink}"
+    showLocalQR "${vlessLink}"
 }
 
 # showXHTTPAccount — display the XHTTP account in a showAccounts-style layout.
@@ -1740,7 +1758,7 @@ showXHTTPAccount() {
     local displayEmail="$6"
     local displayShortId="$7"
     local displayPath="$8"
-    local vlessLink qrLink
+    local vlessLink
 
     if [[ -z "${displayAddress}" ]]; then
         displayAddress="YOUR_SERVER_IP"
@@ -1751,7 +1769,6 @@ showXHTTPAccount() {
         echoContent "yellow" " ---> XHTTP account data is incomplete; skipping subscription link output"
         return 0
     fi
-    qrLink="https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${displayUUID}%40${displayAddress}%3A${displayPort}%3Fencryption%3Dnone%26security%3Dreality%26type%3Dxhttp%26sni%3D${displayServerName}%26fp%3Dchrome%26path%3D${displayPath}%26host%3D${displayServerName}%26pbk%3D${displayPublicKey}%26sid%3D${displayShortId}%23${displayEmail}"
 
     echoContent "skyBlue" "============================= VLESS Reality XHTTP =============================="
     echoContent "skyBlue" ""
@@ -1764,7 +1781,7 @@ showXHTTPAccount() {
     echoContent "green" "Protocol: VLESS reality, Address: ${displayAddress}, publicKey: ${displayPublicKey}, shortId: ${displayShortId}, serverNames: ${displayServerName}, Port: ${displayPort}, Path: ${displayPath}, SNI: ${displayServerName}, Host: ${displayServerName}, UserID: ${displayUUID}, Transport: xhttp, Account: ${displayEmail}"
     echoContent "white" ""
     echoContent "yellow" " ---> QR Code VLESS (VLESS+reality+xhttp)"
-    echoContent "green" "    ${qrLink}"
+    showLocalQR "${vlessLink}"
 }
 
 # showEnglishSubscriptionSection — print the local subscription content and security note.
@@ -1859,11 +1876,11 @@ showEnglishSubscriptionSection() {
     echoContent "white" ""
     echoContent "green" "email:${subscribeName}"
     echoContent "yellow" "url:${subscribeURL}"
-    echoContent "yellow" "Online QR code:https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=$(urlEncode "${subscribeURL}")"
+    showLocalQR "${subscribeURL}"
     if [[ -n "${clashProfileURL}" ]]; then
         echoContent "skyBlue" "\n----------clashMeta/Clash Verge subscription----------\n"
         echoContent "yellow" "url:${clashProfileURL}"
-        echoContent "yellow" "Online QR code:https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=$(urlEncode "${clashProfileURL}")"
+        showLocalQR "${clashProfileURL}"
     fi
 }
 

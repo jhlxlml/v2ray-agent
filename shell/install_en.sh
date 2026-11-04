@@ -393,11 +393,42 @@ buildXrayXHTTPTLSConfig() {
       ],routing:{rules:[{type:"field",inboundTag:["dokodemo-in-VLESSXHTTPTLS"],outboundTag:"z_direct_outbound"}]}}'
 }
 
+
+urlEncode() {
+    local LC_ALL=C
+    local input="$1" index char
+    for ((index = 0; index < ${#input}; index++)); do
+        char="${input:index:1}"
+        case "${char}" in
+            [a-zA-Z0-9.~_-]) printf '%s' "${char}" ;;
+            *) printf '%%%02X' "'${char}" ;;
+        esac
+    done
+}
+
+showLocalQR() {
+    if command -v qrencode >/dev/null 2>&1; then
+        if ! printf '%s' "$1" | qrencode -t ANSIUTF8; then
+            printf '%s\n' "$1"
+        fi
+    else
+        printf '%s\n' 'Install qrencode for terminal QR codes. Connection link:' "$1"
+    fi
+}
+
+uriHost() {
+    if [[ "$1" == *:* && "$1" != \[*\] ]]; then
+        printf '[%s]' "$1"
+    else
+        printf '%s' "$1"
+    fi
+}
+
 buildVLESSXHTTPTLSURI() {
     local address=$1 port=$2 uuidValue=$3 domainName=$4 pathValue=$5 modeValue=$6 name=$7
     pathValue="/${pathValue#\/}"
-    printf 'vless://%s@%s:%s?encryption=none&security=tls&type=xhttp&sni=%s&host=%s&fp=chrome&alpn=h2&path=%%2F%s&mode=%s#%s\n' \
-        "${uuidValue}" "${address}" "${port}" "${domainName}" "${domainName}" "${pathValue#/}" "${modeValue}" "${name}"
+    printf 'vless://%s@%s:%s?encryption=none&security=tls&type=xhttp&sni=%s&host=%s&fp=chrome&alpn=h2&path=%s&mode=%s#%s\n' \
+        "${uuidValue}" "$(uriHost "${address}")" "${port}" "${domainName}" "${domainName}" "$(urlEncode "${pathValue}")" "${modeValue}" "$(urlEncode "${name}")"
 }
 
 buildMihomoXHTTPTLSNode() {
@@ -993,21 +1024,37 @@ allowPort() {
 }
 # Get public IP
 getPublicIP() {
-    local type=4
-    if [[ -n "$1" ]]; then
-        type=$1
+    local family=${1:-4} address
+    case "${family}" in
+        4) address=${VASMA_PUBLIC_IPV4:-} ;;
+        6) address=${VASMA_PUBLIC_IPV6:-} ;;
+        *) return 1 ;;
+    esac
+    if [[ -z "${1:-}" ]]; then
+        address=${VASMA_PUBLIC_IPV4:-${VASMA_PUBLIC_IPV6:-}}
     fi
-    if [[ -n "${currentHost}" && -z "$1" ]] && [[ "${singBoxVLESSRealityVisionServerName}" == "${currentHost}" || "${singBoxVLESSRealityGRPCServerName}" == "${currentHost}" || "${xrayVLESSRealityServerName}" == "${currentHost}" ]]; then
-        echo "${currentHost}"
-    else
-        local currentIP=
-        currentIP=$(curl -s "-${type}" http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | awk -F "[=]" '{print $2}')
-        if [[ -z "${currentIP}" && -z "$1" ]]; then
-            currentIP=$(curl -s "-6" http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | awk -F "[=]" '{print $2}')
-        fi
-        echo "${currentIP}"
+    if [[ -n "${address}" ]]; then
+        printf '%s\n' "${address}"
+        return
+    fi
+    if [[ -z "${1:-}" && -n "${currentHost}" ]] &&
+        [[ "${singBoxVLESSRealityVisionServerName}" == "${currentHost}" ||
+           "${singBoxVLESSRealityGRPCServerName}" == "${currentHost}" ||
+           "${xrayVLESSRealityServerName}" == "${currentHost}" ]]; then
+        printf '%s\n' "${currentHost}"
+        return
+    fi
+    if [[ "${VASMA_DISABLE_IP_LOOKUP:-0}" == 1 ]]; then
+        return 0
     fi
 
+    local endpoint=https://www.cloudflare.com/cdn-cgi/trace
+    printf '%s %s\n' 'Public IP lookup via' "${endpoint}" >&2
+    address=$(curl -fsS --max-time 4 "-${family}" "${endpoint}" | sed -n 's/^ip=//p')
+    if [[ -z "${address}" && -z "${1:-}" ]]; then
+        address=$(curl -fsS --max-time 4 -6 "${endpoint}" | sed -n 's/^ip=//p')
+    fi
+    printf '%s\n' "${address}"
 }
 
 # Output ufw port open status
@@ -1698,6 +1745,9 @@ checkDNSIP() {
     local publicIP=
 
     publicIP=$(getPublicIP "${ipType}")
+    if [[ -z "${publicIP}" && "${VASMA_DISABLE_IP_LOOKUP:-0}" == 1 ]]; then
+        return 0
+    fi
     if [[ "${publicIP}" != "${dnsIP}" ]]; then
         echoContent red " ---> The domain name resolution IP is inconsistent with the current server IP\n"
         echoContent yellow " ---> Please check whether the domain name resolution is valid and correct"
@@ -1728,7 +1778,7 @@ checkPortOpen() {
         touch ${nginxConfigPath}checkPortOpen.conf
         local listenIPv6PortConfig=
 
-        if [[ -n $(curl -s -6 -m 4 http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | cut -d "=" -f 2) ]]; then
+        if [[ -n $(getPublicIP 6) ]]; then
             listenIPv6PortConfig="listen [::]:${port};"
         fi
         cat <<EOF >${nginxConfigPath}checkPortOpen.conf
@@ -5591,7 +5641,7 @@ initSubscribeLocalConfig() {
 # General
 defaultBase64Code() {
     local type=$1
-    local qrCodeBase64Default
+    local qrCodeBase64Default nodeURI realityAddress
     local port=$2
     local email=$3
     local id=$4
@@ -5608,7 +5658,7 @@ defaultBase64Code() {
         echoContent yellow " ---> Formatted details (VLESS+XHTTP+TLS)"
         echoContent green " Protocol :VLESS, Address :${add}, Server name /SNI:${currentHost}, Port :${port}, User ID:${id}, Security :tls, Transport :xhttp, Path :${path}, Mode :${currentXHTTPMode:-auto}, Account :${email}\n"
         echoContent yellow " ---> QR code VLESS(VLESS+XHTTP+TLS)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40${add}%3A${port}%3Fencryption%3Dnone%26security%3Dtls%26type%3Dxhttp%26sni%3D${currentHost}%26host%3D${currentHost}%26fp%3Dchrome%26alpn%3Dh2%26path%3D%252F${path#/}%26mode%3D${currentXHTTPMode:-auto}%23${email}"
+        showLocalQR "${xhttpTLSURI}"
         printf '%s\n' "${xhttpTLSURI}" >>"${outputRoot}/default/${user}" || return 1
         buildMihomoXHTTPTLSNode "${add}" "${port}" "${id}" "${currentHost}" "${path}" "${currentXHTTPMode:-auto}" "${email}" >>"${outputRoot}/clashMeta/${user}" || return 1
         return 0
@@ -5620,12 +5670,13 @@ defaultBase64Code() {
     if [[ "${type}" == "vlesstcp" ]]; then
 
         echoContent yellow " ---> Universal format (VLESS+TCP+TLS_Vision)"
-        echoContent green "    vless://${id}@${currentHost}:${port}?encryption=none&security=tls&fp=chrome&type=tcp&host=${currentHost}&headerType=none&sni=${currentHost}&flow=xtls-rprx-vision#${email}\n"
+        nodeURI="vless://$(urlEncode "${id}")@$(uriHost "${currentHost}"):${port}?encryption=none&security=tls&fp=chrome&type=tcp&host=${currentHost}&headerType=none&sni=${currentHost}&flow=xtls-rprx-vision#$(urlEncode "${email}")"
+        echoContent green "    ${nodeURI}\n"
 
         echoContent yellow " ---> Formatted plain text (VLESS+TCP+TLS_Vision)"
         echoContent green " Protocol :VLESS, Address :${currentHost}, Port :${port}, User ID:${id}, Security :tls, client-fingerprint: chrome, Transport :tcp, flow:xtls-rprx-vision, Account :${email}\n"
         cat <<EOF >>"${outputRoot}/default/${user}" || return 1
-vless://${id}@${currentHost}:${port}?encryption=none&security=tls&type=tcp&host=${currentHost}&fp=chrome&headerType=none&sni=${currentHost}&flow=xtls-rprx-vision#${email}
+${nodeURI}
 EOF
         cat <<EOF >>"${outputRoot}/clashMeta/${user}" || return 1
   - name: "${email}"
@@ -5643,7 +5694,7 @@ EOF
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${outputRoot}/sing-box/${user}" || return 1
 
         echoContent yellow " ---> Formatted plain text (VLESS+TCP+TLS)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40${currentHost}%3A${port}%3Fencryption%3Dnone%26fp%3Dchrome%26security%3Dtls%26type%3Dtcp%26${currentHost}%3D${currentHost}%26headerType%3Dnone%26sni%3D${currentHost}%26flow%3Dxtls-rprx-vision%23${email}\n"
+        showLocalQR "${nodeURI}"
 
     elif [[ "${type}" == "vmessws" ]]; then
         qrCodeBase64Default=$(echo -n "{\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"ws\",\"add\":\"${add}\",\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}" | base64 -w 0) || return 1
@@ -5680,18 +5731,19 @@ EOF
 
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${outputRoot}/sing-box/${user}" || return 1
 
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vmess://${qrCodeBase64Default}\n"
+        showLocalQR "vmess://${qrCodeBase64Default}"
 
     elif [[ "${type}" == "vlessws" ]]; then
 
         echoContent yellow " ---> Universal format (VLESS+WS+TLS)"
-        echoContent green "    vless://${id}@${add}:${port}?encryption=none&security=tls&type=ws&host=${currentHost}&sni=${currentHost}&fp=chrome&path=${path}#${email}\n"
+        nodeURI="vless://$(urlEncode "${id}")@$(uriHost "${add}"):${port}?encryption=none&security=tls&type=ws&host=${currentHost}&sni=${currentHost}&fp=chrome&path=$(urlEncode "${path}")#$(urlEncode "${email}")"
+        echoContent green "    ${nodeURI}\n"
 
         echoContent yellow " ---> Formatted plain text (VLESS+WS+TLS)"
         echoContent green " Protocol :VLESS, Address :${add}, Server name /SNI:${currentHost}, Port :${port}, client-fingerprint: chrome, User ID:${id}, Security :tls, Transport :ws, Path :${path}, Account :${email}\n"
 
         cat <<EOF >>"${outputRoot}/default/${user}" || return 1
-vless://${id}@${add}:${port}?encryption=none&security=tls&type=ws&host=${currentHost}&sni=${currentHost}&fp=chrome&path=${path}#${email}
+${nodeURI}
 EOF
         cat <<EOF >>"${outputRoot}/clashMeta/${user}" || return 1
   - name: "${email}"
@@ -5714,7 +5766,7 @@ EOF
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${outputRoot}/sing-box/${user}" || return 1
 
         echoContent yellow " ---> QR code VLESS(VLESS+WS+TLS)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40${add}%3A${port}%3Fencryption%3Dnone%26security%3Dtls%26type%3Dws%26host%3D${currentHost}%26fp%3Dchrome%26sni%3D${currentHost}%26path%3D${path}%23${email}"
+        showLocalQR "${nodeURI}"
 
     elif [[ "${type}" == "vlessXHTTP" ]]; then
 
@@ -5724,12 +5776,13 @@ EOF
         fi
 
         echoContent yellow " ---> Generic format (VLESS+reality+XHTTP)"
-        echoContent green "    vless://${id}@${add}:${port}?encryption=none&security=reality${xhttpMldsa65Param}&type=xhttp&sni=${xrayVLESSRealityXHTTPServerName}&host=${xrayVLESSRealityXHTTPServerName}&fp=chrome&path=${path}&pbk=${currentRealityXHTTPPublicKey}&sid=6ba85179e30d4fc2#${email}\n"
+        nodeURI="vless://$(urlEncode "${id}")@$(uriHost "${add}"):${port}?encryption=none&security=reality${xhttpMldsa65Param}&type=xhttp&sni=${xrayVLESSRealityXHTTPServerName}&host=${xrayVLESSRealityXHTTPServerName}&fp=chrome&path=$(urlEncode "${path}")&pbk=${currentRealityXHTTPPublicKey}&sid=6ba85179e30d4fc2#$(urlEncode "${email}")"
+        echoContent green "    ${nodeURI}\n"
 
         echoContent yellow " ---> Formatted details (VLESS+reality+XHTTP)"
         echoContent green " Protocol :VLESS reality, Address :${add}, publicKey:${currentRealityXHTTPPublicKey}, shortId: 6ba85179e30d4fc2,serverNames: ${xrayVLESSRealityXHTTPServerName}, Port :${port}, Path : ${path}, SNI:${xrayVLESSRealityXHTTPServerName}, Server name :${xrayVLESSRealityXHTTPServerName}, User ID:${id}, Transport :xhttp, Account :${email}\n"
         cat <<EOF >>"${outputRoot}/default/${user}" || return 1
-vless://${id}@${add}:${port}?encryption=none&security=reality${xhttpMldsa65Param}&type=xhttp&sni=${xrayVLESSRealityXHTTPServerName}&fp=chrome&path=${path}&pbk=${currentRealityXHTTPPublicKey}&sid=6ba85179e30d4fc2#${email}
+${nodeURI}
 EOF
 
         cat <<EOF >>"${outputRoot}/clashMeta/${user}" || return 1
@@ -5755,20 +5808,21 @@ EOF
 EOF
 
         echoContent yellow " ---> QR code VLESS(VLESS+WS+TLS)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40${add}%3A${port}%3Fencryption%3Dnone%26security%3Dreality%26type%3Dxhttp%26sni%3D${xrayVLESSRealityXHTTPServerName}%26fp%3Dchrome%26path%3D${path}%26host%3D${xrayVLESSRealityXHTTPServerName}%26pbk%3D${currentRealityXHTTPPublicKey}%26sid%3D6ba85179e30d4fc2%23${email}\n"
+        showLocalQR "${nodeURI}"
 
     elif
         [[ "${type}" == "vlessgrpc" ]]
     then
 
         echoContent yellow " ---> Universal format (VLESS+gRPC+TLS)"
-        echoContent green "    vless://${id}@${add}:${port}?encryption=none&security=tls&type=grpc&host=${currentHost}&path=${currentPath}grpc&fp=chrome&serviceName=${currentPath}grpc&alpn=h2&sni=${currentHost}#${email}\n"
+        nodeURI="vless://$(urlEncode "${id}")@$(uriHost "${add}"):${port}?encryption=none&security=tls&type=grpc&host=${currentHost}&path=${currentPath}grpc&fp=chrome&serviceName=${currentPath}grpc&alpn=h2&sni=${currentHost}#$(urlEncode "${email}")"
+        echoContent green "    ${nodeURI}\n"
 
         echoContent yellow " ---> Formatted plain text (VLESS+gRPC+TLS)"
         echoContent green " Protocol :VLESS, Address :${add}, Server name /SNI:${currentHost}, Port :${port}, User ID:${id}, Security :tls, Transport :gRPC, alpn:h2, client-fingerprint: chrome,serviceName:${currentPath}grpc, Account :${email}\n"
 
         cat <<EOF >>"${outputRoot}/default/${user}" || return 1
-vless://${id}@${add}:${port}?encryption=none&security=tls&type=grpc&host=${currentHost}&path=${currentPath}grpc&serviceName=${currentPath}grpc&fp=chrome&alpn=h2&sni=${currentHost}#${email}
+${nodeURI}
 EOF
         cat <<EOF >>"${outputRoot}/clashMeta/${user}" || return 1
   - name: "${email}"
@@ -5789,15 +5843,16 @@ EOF
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${outputRoot}/sing-box/${user}" || return 1
 
         echoContent yellow " ---> QR code VLESS(VLESS+gRPC+TLS)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40${add}%3A${port}%3Fencryption%3Dnone%26security%3Dtls%26type%3Dgrpc%26host%3D${currentHost}%26serviceName%3D${currentPath}grpc%26fp%3Dchrome%26path%3D${currentPath}grpc%26sni%3D${currentHost}%26alpn%3Dh2%23${email}"
+        showLocalQR "${nodeURI}"
 
     elif [[ "${type}" == "trojan" ]]; then
         # URLEncode
         echoContent yellow " ---> Trojan(TLS)"
-        echoContent green "    trojan://${id}@${currentHost}:${port}?peer=${currentHost}&fp=chrome&sni=${currentHost}&alpn=http/1.1#${currentHost}_Trojan\n"
+        nodeURI="trojan://$(urlEncode "${id}")@$(uriHost "${currentHost}"):${port}?peer=${currentHost}&fp=chrome&sni=${currentHost}&alpn=http/1.1#$(urlEncode "${email}")"
+        echoContent green "    ${nodeURI}\n"
 
         cat <<EOF >>"${outputRoot}/default/${user}" || return 1
-trojan://${id}@${currentHost}:${port}?peer=${currentHost}&fp=chrome&sni=${currentHost}&alpn=http/1.1#${email}_Trojan
+${nodeURI}
 EOF
 
         cat <<EOF >>"${outputRoot}/clashMeta/${user}" || return 1
@@ -5814,15 +5869,16 @@ EOF
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${outputRoot}/sing-box/${user}" || return 1
 
         echoContent yellow " ---> QR code Trojan(TLS)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=trojan%3a%2f%2f${id}%40${currentHost}%3a${port}%3fpeer%3d${currentHost}%26fp%3Dchrome%26sni%3d${currentHost}%26alpn%3Dhttp/1.1%23${email}\n"
+        showLocalQR "${nodeURI}"
 
     elif [[ "${type}" == "trojangrpc" ]]; then
         # URLEncode
 
         echoContent yellow " ---> Trojan gRPC(TLS)"
-        echoContent green "    trojan://${id}@${add}:${port}?encryption=none&peer=${currentHost}&fp=chrome&security=tls&type=grpc&sni=${currentHost}&alpn=h2&path=${currentPath}trojangrpc&serviceName=${currentPath}trojangrpc#${email}\n"
+        nodeURI="trojan://$(urlEncode "${id}")@$(uriHost "${add}"):${port}?encryption=none&peer=${currentHost}&fp=chrome&security=tls&type=grpc&sni=${currentHost}&alpn=h2&path=${currentPath}trojangrpc&serviceName=${currentPath}trojangrpc#$(urlEncode "${email}")"
+        echoContent green "    ${nodeURI}\n"
         cat <<EOF >>"${outputRoot}/default/${user}" || return 1
-trojan://${id}@${add}:${port}?encryption=none&peer=${currentHost}&security=tls&type=grpc&fp=chrome&sni=${currentHost}&alpn=h2&path=${currentPath}trojangrpc&serviceName=${currentPath}trojangrpc#${email}
+${nodeURI}
 EOF
         cat <<EOF >>"${outputRoot}/clashMeta/${user}" || return 1
   - name: "${email}"
@@ -5841,23 +5897,22 @@ EOF
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${outputRoot}/sing-box/${user}" || return 1
 
         echoContent yellow " ---> QR code Trojan gRPC(TLS)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=trojan%3a%2f%2f${id}%40${add}%3a${port}%3Fencryption%3Dnone%26fp%3Dchrome%26security%3Dtls%26peer%3d${currentHost}%26type%3Dgrpc%26sni%3d${currentHost}%26path%3D${currentPath}trojangrpc%26alpn%3Dh2%26serviceName%3D${currentPath}trojangrpc%23${email}\n"
+        showLocalQR "${nodeURI}"
 
     elif [[ "${type}" == "hysteria" ]]; then
         echoContent yellow " ---> Hysteria(TLS)"
         local clashMetaPortContent="port: ${port}"
         local multiPort=
-        local multiPortEncode
         if echo "${port}" | grep -q "-"; then
             clashMetaPortContent="ports: \"${port}\"
     hop-interval: ${hysteria2HopInterval:-60}"
             multiPort="mport=${port}&"
-            multiPortEncode="mport%3D${port}%26"
         fi
 
-        echoContent green "    hysteria2://${id}@${currentHost}:${port}?${multiPort}peer=${currentHost}&insecure=0&sni=${currentHost}&alpn=h3#${email}\n"
+        nodeURI="hysteria2://$(urlEncode "${id}")@$(uriHost "${currentHost}"):${port}?${multiPort}peer=${currentHost}&insecure=0&sni=${currentHost}&alpn=h3#$(urlEncode "${email}")"
+        echoContent green "    ${nodeURI}\n"
         cat <<EOF >>"${outputRoot}/default/${user}" || return 1
-hysteria2://${id}@${currentHost}:${port}?${multiPort}peer=${currentHost}&insecure=0&sni=${currentHost}&alpn=h3#${email}
+${nodeURI}
 EOF
         echoContent yellow " ---> v2rayN(hysteria+TLS)"
         jq -n --arg server "${currentHost}:${port}" --arg password "${id}" --arg host "${currentHost}" \
@@ -5884,7 +5939,7 @@ EOF
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${outputRoot}/sing-box/${user}" || return 1
 
         echoContent yellow " ---> QR code Hysteria(TLS)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=hysteria2%3A%2F%2F${id}%40${currentHost}%3A${port}%3F${multiPortEncode}peer%3D${currentHost}%26insecure%3D0%26sni%3D${currentHost}%26alpn%3Dh3%23${email}\n"
+        showLocalQR "${nodeURI}"
 
     elif [[ "${type}" == "vlessReality" ]]; then
         local realityServerName=${xrayVLESSRealityServerName}
@@ -5900,17 +5955,20 @@ EOF
             publicKey=${singBoxVLESSRealityPublicKey}
         fi
         echoContent yellow " ---> Universal format (VLESS+reality+uTLS+Vision)"
-        echoContent green "    vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${realityMldsa65Param}&type=tcp&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=6ba85179e30d4fc2&flow=xtls-rprx-vision#${email}\n"
+        realityAddress=$(getPublicIP)
+        [[ -n "${realityAddress}" ]] || return 1
+        nodeURI="vless://$(urlEncode "${id}")@$(uriHost "${realityAddress}"):${port}?encryption=none&security=reality${realityMldsa65Param}&type=tcp&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=6ba85179e30d4fc2&flow=xtls-rprx-vision#$(urlEncode "${email}")"
+        echoContent green "    ${nodeURI}\n"
 
         echoContent yellow " ---> Formatted plain text (VLESS+reality+uTLS+Vision)"
-        echoContent green " Protocol :VLESS reality, Address :$(getPublicIP), publicKey:${publicKey}, shortId: 6ba85179e30d4fc2${realityMldsa65Param:+, pqv=${realityMldsa65Verify}}, serverNames: ${realityServerName}, Port :${port}, User ID:${id}, Transport :tcp, Account :${email}\n"
+        echoContent green " Protocol :VLESS reality, Address :${realityAddress}, publicKey:${publicKey}, shortId: 6ba85179e30d4fc2${realityMldsa65Param:+, pqv=${realityMldsa65Verify}}, serverNames: ${realityServerName}, Port :${port}, User ID:${id}, Transport :tcp, Account :${email}\n"
         cat <<EOF >>"${outputRoot}/default/${user}" || return 1
-vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${realityMldsa65Param}&type=tcp&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=6ba85179e30d4fc2&flow=xtls-rprx-vision#${email}
+${nodeURI}
 EOF
         cat <<EOF >>"${outputRoot}/clashMeta/${user}" || return 1
   - name: "${email}"
     type: vless
-    server: $(getPublicIP)
+    server: ${realityAddress}
     port: ${port}
     uuid: ${id}
     network: tcp
@@ -5926,11 +5984,11 @@ EOF
     client-fingerprint: chrome
 EOF
 
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vless\",\"server\":\"$(getPublicIP)\",\"server_port\":${port},\"uuid\":\"${id}\",\"flow\":\"xtls-rprx-vision\",\"tls\":{\"enabled\":true,\"server_name\":\"${realityServerName}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"},\"reality\":{\"enabled\":true,\"public_key\":\"${publicKey}\",\"short_id\":\"6ba85179e30d4fc2\"}},\"packet_encoding\":\"xudp\"}]" "${outputRoot}/sing-box/${user}") || return 1
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vless\",\"server\":\"${realityAddress}\",\"server_port\":${port},\"uuid\":\"${id}\",\"flow\":\"xtls-rprx-vision\",\"tls\":{\"enabled\":true,\"server_name\":\"${realityServerName}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"},\"reality\":{\"enabled\":true,\"public_key\":\"${publicKey}\",\"short_id\":\"6ba85179e30d4fc2\"}},\"packet_encoding\":\"xudp\"}]" "${outputRoot}/sing-box/${user}") || return 1
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${outputRoot}/sing-box/${user}" || return 1
 
         echoContent yellow " ---> QR code VLESS(VLESS+reality+uTLS+Vision)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40$(getPublicIP)%3A${port}%3Fencryption%3Dnone%26security%3Dreality%26type%3Dtcp%26sni%3D${realityServerName}%26fp%3Dchrome%26pbk%3D${publicKey}%26sid%3D6ba85179e30d4fc2%26flow%3Dxtls-rprx-vision%23${email}\n"
+        showLocalQR "${nodeURI}"
 
     elif [[ "${type}" == "vlessRealityGRPC" ]]; then
         local realityServerName=${xrayVLESSRealityServerName}
@@ -5947,17 +6005,20 @@ EOF
         fi
 
         echoContent yellow " ---> Universal format (VLESS+reality+uTLS+gRPC)"
-        echoContent green "    vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${realityMldsa65Param}&type=grpc&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=6ba85179e30d4fc2&path=grpc&serviceName=grpc#${email}\n"
+        realityAddress=$(getPublicIP)
+        [[ -n "${realityAddress}" ]] || return 1
+        nodeURI="vless://$(urlEncode "${id}")@$(uriHost "${realityAddress}"):${port}?encryption=none&security=reality${realityMldsa65Param}&type=grpc&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=6ba85179e30d4fc2&path=grpc&serviceName=grpc#$(urlEncode "${email}")"
+        echoContent green "    ${nodeURI}\n"
 
         echoContent yellow " ---> Formatted plain text (VLESS+reality+uTLS+gRPC)"
-        echoContent green " Protocol :VLESS reality, serviceName:grpc, Address :$(getPublicIP), publicKey:${publicKey}, shortId: 6ba85179e30d4fc2${realityMldsa65Param:+, pqv=${realityMldsa65Verify}}, serverNames: ${realityServerName}, Port :${port}, User ID:${id}, Transport :gRPC, client-fingerprint: chrome, Account :${email}\n"
+        echoContent green " Protocol :VLESS reality, serviceName:grpc, Address :${realityAddress}, publicKey:${publicKey}, shortId: 6ba85179e30d4fc2${realityMldsa65Param:+, pqv=${realityMldsa65Verify}}, serverNames: ${realityServerName}, Port :${port}, User ID:${id}, Transport :gRPC, client-fingerprint: chrome, Account :${email}\n"
         cat <<EOF >>"${outputRoot}/default/${user}" || return 1
-vless://${id}@$(getPublicIP):${port}?encryption=none&security=reality${realityMldsa65Param}&type=grpc&sni=${realityServerName}&fp=chrome&pbk=${publicKey}&sid=6ba85179e30d4fc2&path=grpc&serviceName=grpc#${email}
+${nodeURI}
 EOF
         cat <<EOF >>"${outputRoot}/clashMeta/${user}" || return 1
   - name: "${email}"
     type: vless
-    server: $(getPublicIP)
+    server: ${realityAddress}
     port: ${port}
     uuid: ${id}
     network: grpc
@@ -5973,11 +6034,11 @@ EOF
     client-fingerprint: chrome
 EOF
 
-        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vless\",\"server\":\"$(getPublicIP)\",\"server_port\":${port},\"uuid\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${realityServerName}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"},\"reality\":{\"enabled\":true,\"public_key\":\"${publicKey}\",\"short_id\":\"6ba85179e30d4fc2\"}},\"packet_encoding\":\"xudp\",\"transport\":{\"type\":\"grpc\",\"service_name\":\"grpc\"}}]" "${outputRoot}/sing-box/${user}") || return 1
+        singBoxSubscribeLocalConfig=$(jq -r ". += [{\"tag\":\"${email}\",\"type\":\"vless\",\"server\":\"${realityAddress}\",\"server_port\":${port},\"uuid\":\"${id}\",\"tls\":{\"enabled\":true,\"server_name\":\"${realityServerName}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"},\"reality\":{\"enabled\":true,\"public_key\":\"${publicKey}\",\"short_id\":\"6ba85179e30d4fc2\"}},\"packet_encoding\":\"xudp\",\"transport\":{\"type\":\"grpc\",\"service_name\":\"grpc\"}}]" "${outputRoot}/sing-box/${user}") || return 1
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${outputRoot}/sing-box/${user}" || return 1
 
         echoContent yellow " ---> QR code VLESS(VLESS+reality+uTLS+gRPC)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vless%3A%2F%2F${id}%40$(getPublicIP)%3A${port}%3Fencryption%3Dnone%26security%3Dreality%26type%3Dgrpc%26sni%3D${realityServerName}%26fp%3Dchrome%26pbk%3D${publicKey}%26sid%3D6ba85179e30d4fc2%26path%3Dgrpc%26serviceName%3Dgrpc%23${email}\n"
+        showLocalQR "${nodeURI}"
     elif [[ "${type}" == "tuic" ]]; then
         local tuicUUID=
         tuicUUID=$(echo "${id}" | awk -F "[_]" '{print $1}')
@@ -5993,8 +6054,9 @@ EOF
         echoContent yellow " ---> Formatted plain text (Tuic+TLS)"
         echoContent green " Protocol :Tuic, Address :${currentHost}, Port : ${port}, uuid: ${tuicUUID}, password: ${tuicPassword}, congestion-controller:${tuicAlgorithm}, alpn: h3, Account :${email}\n"
 
+        nodeURI="tuic://${tuicUUID}:$(urlEncode "${tuicPassword}")@$(uriHost "${currentHost}"):${port}?congestion_control=${tuicAlgorithm}&alpn=h3&sni=${currentHost}&udp_relay_mode=quic&allow_insecure=0#$(urlEncode "${email}")"
         cat <<EOF >>"${outputRoot}/default/${user}" || return 1
-tuic://${tuicUUID}:${tuicPassword}@${currentHost}:${port}?congestion_control=${tuicAlgorithm}&alpn=h3&sni=${currentHost}&udp_relay_mode=quic&allow_insecure=0#${email}
+${nodeURI}
 EOF
         echoContent yellow " ---> v2rayN(Tuic+TLS)"
         echo "{\"relay\": {\"server\": \"${currentHost}:${port}\",\"uuid\": \"${tuicUUID}\",\"password\": \"${tuicPassword}\",\"ip\": \"${currentHost}\",\"congestion_control\": \"${tuicAlgorithm}\",\"alpn\": [\"h3\"]},\"local\": {\"server\": \"127.0.0.1:7798\"},\"log_level\": \"warn\"}" | jq
@@ -6018,16 +6080,17 @@ EOF
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${outputRoot}/sing-box/${user}" || return 1
 
         echoContent yellow "\n ---> QR code Tuic"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=tuic%3A%2F%2F${tuicUUID}%3A${tuicPassword}%40${currentHost}%3A${tuicPort}%3Fcongestion_control%3D${tuicAlgorithm}%26alpn%3Dh3%26sni%3D${currentHost}%26udp_relay_mode%3Dquic%26allow_insecure%3D0%23${email}\n"
+        showLocalQR "${nodeURI}"
     elif [[ "${type}" == "naive" ]]; then
         echoContent yellow " ---> Naive(TLS)"
 
-        echoContent green "    naive+https://${email}:${id}@${currentHost}:${port}?padding=true#${email}\n"
+        nodeURI="naive+https://$(urlEncode "${email}"):$(urlEncode "${id}")@$(uriHost "${currentHost}"):${port}?padding=true#$(urlEncode "${email}")"
+        echoContent green "    ${nodeURI}\n"
         cat <<EOF >>"${outputRoot}/default/${user}" || return 1
-naive+https://${email}:${id}@${currentHost}:${port}?padding=true#${email}
+${nodeURI}
 EOF
         echoContent yellow " ---> QR code Naive(TLS)"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=naive%2Bhttps%3A%2F%2F${email}%3A${id}%40${currentHost}%3A${port}%3Fpadding%3Dtrue%23${email}\n"
+        showLocalQR "${nodeURI}"
     elif [[ "${type}" == "vmessHTTPUpgrade" ]]; then
         qrCodeBase64Default=$(echo -n "{\"port\":${port},\"ps\":\"${email}\",\"tls\":\"tls\",\"id\":\"${id}\",\"aid\":0,\"v\":2,\"host\":\"${currentHost}\",\"type\":\"none\",\"path\":\"${path}\",\"net\":\"httpupgrade\",\"add\":\"${add}\",\"method\":\"none\",\"peer\":\"${currentHost}\",\"sni\":\"${currentHost}\"}" | base64 -w 0) || return 1
         qrCodeBase64Default="${qrCodeBase64Default// /}"
@@ -6064,7 +6127,7 @@ EOF
 
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${outputRoot}/sing-box/${user}" || return 1
 
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=vmess://${qrCodeBase64Default}\n"
+        showLocalQR "vmess://${qrCodeBase64Default}"
 
     elif [[ "${type}" == "anytls" ]]; then
         echoContent yellow " ---> AnyTLS"
@@ -6072,9 +6135,10 @@ EOF
         echoContent yellow " ---> Formatted details (AnyTLS)"
         echoContent green " Protocol :anytls, Address :${currentHost}, Port :${singBoxAnyTLSPort}, User ID:${id}, Transport :tcp, Account :${email}\n"
 
-        echoContent green "    anytls://${id}@${currentHost}:${singBoxAnyTLSPort}?peer=${currentHost}&insecure=0&sni=${currentHost}#${email}\n"
+        nodeURI="anytls://$(urlEncode "${id}")@$(uriHost "${currentHost}"):${singBoxAnyTLSPort}?peer=${currentHost}&insecure=0&sni=${currentHost}#$(urlEncode "${email}")"
+        echoContent green "    ${nodeURI}\n"
         cat <<EOF >>"${outputRoot}/default/${user}" || return 1
-anytls://${id}@${currentHost}:${singBoxAnyTLSPort}?peer=${currentHost}&insecure=0&sni=${currentHost}#${email}
+${nodeURI}
 EOF
         cat <<EOF >>"${outputRoot}/clashMeta/${user}" || return 1
   - name: "${email}"
@@ -6094,9 +6158,8 @@ EOF
         echo "${singBoxSubscribeLocalConfig}" | jq . >"${outputRoot}/sing-box/${user}" || return 1
 
         echoContent yellow " ---> QR code AnyTLS"
-        echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=anytls%3A%2F%2F${id}%40${currentHost}%3A${singBoxAnyTLSPort}%3Fpeer%3D${currentHost}%26insecure%3D0%26sni%3D${currentHost}%23${email}\n"
+        showLocalQR "${nodeURI}"
     fi
-
 }
 
 # Get Reality subscription port
@@ -7540,7 +7603,7 @@ aliasInstall() {
 
 # Check ipv6, ipv4
 checkIPv6() {
-    currentIPv6IP=$(curl -s -6 -m 4 http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | cut -d "=" -f 2)
+    currentIPv6IP=$(getPublicIP 6)
 
     if [[ -z "${currentIPv6IP}" ]]; then
         echoContent red " ---> does not support ipv6"
@@ -10815,7 +10878,7 @@ installSubscribe() {
             serverName="server_name ${subscribeServerName};"
             nginxSubscribeSSL="ssl_certificate /etc/v2ray-agent/tls/${subscribeServerName}.crt;ssl_certificate_key /etc/v2ray-agent/tls/${subscribeServerName}.key;"
         fi
-        if [[ -n "$(curl --connect-timeout 2 -s -6 http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | cut -d "=" -f 2)" ]]; then
+        if [[ -n "$(getPublicIP 6)" ]]; then
             listenIPv6="listen [::]:${result[-1]} ${SSLType};"
         fi
         if echo "${nginxVersion}" | grep -q "1.25" && [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $3}') -gt 0 ]] || [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $2}') -gt 25 ]]; then
@@ -11338,7 +11401,7 @@ viewSubscriptionByUser() {
     currentDomain=${currentHost}
     if [[ -n "${subscribePort}" ]]; then
         if [[ "${subscribeType}" == http ]]; then
-            currentDomain="$(getPublicIP):${subscribePort}"
+            currentDomain="$(uriHost "$(getPublicIP)"):${subscribePort}"
         else
             currentDomain="${currentHost}:${subscribePort}"
         fi
@@ -11465,7 +11528,7 @@ subscribe() (
                 fi
                 if [[ -n "${subscribePortLocal}" ]]; then
                     if [[ "${subscribeType}" == "http" ]]; then
-                        currentDomain="$(getPublicIP):${subscribePort}"
+                        currentDomain="$(uriHost "$(getPublicIP)"):${subscribePort}"
                     else
                         currentDomain="${currentHost}:${subscribePort}"
                     fi
@@ -11498,7 +11561,7 @@ subscribe() (
                     echoContent skyBlue "\n----------Default subscription----------\n"
                     echoContent green "email:${email}\n"
                     echoContent yellow "url:${subscribeType}://${currentDomain}/s/default/${emailMd5}\n"
-                    echoContent yellow " Online QR code :https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${subscribeType}://${currentDomain}/s/default/${emailMd5}\n"
+                    showLocalQR "${subscribeType}://${currentDomain}/s/default/${emailMd5}"
                     if [[ "${release}" != "alpine" ]]; then
                         echo "${subscribeType}://${currentDomain}/s/default/${emailMd5}" | qrencode -s 10 -m 1 -t UTF8
                     fi
@@ -11508,7 +11571,7 @@ subscribe() (
 
                         echoContent skyBlue "\n----------clashMeta subscription----------\n"
                         echoContent yellow "url:${subscribeType}://${currentDomain}/s/clashMetaProfiles/${emailMd5}\n"
-                        echoContent yellow " Online QR code :https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${subscribeType}://${currentDomain}/s/clashMetaProfiles/${emailMd5}\n"
+                        showLocalQR "${subscribeType}://${currentDomain}/s/clashMetaProfiles/${emailMd5}"
                         if [[ "${release}" != "alpine" ]]; then
                             echo "${subscribeType}://${currentDomain}/s/clashMetaProfiles/${emailMd5}" | qrencode -s 10 -m 1 -t UTF8
                         fi
@@ -11518,7 +11581,7 @@ subscribe() (
                     if [[ -f "/etc/v2ray-agent/subscribe_local/sing-box/${email}" ]]; then
                         echoContent skyBlue "\n----------sing-box subscription ----------\n"
                         echoContent yellow "url:${subscribeType}://${currentDomain}/s/sing-box/${emailMd5}"
-                        echoContent yellow " Online QR code :https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${subscribeType}://${currentDomain}/s/sing-box/${emailMd5}"
+                        showLocalQR "${subscribeType}://${currentDomain}/s/sing-box/${emailMd5}"
                         if [[ "${release}" != "alpine" ]]; then
                             echo "${subscribeType}://${currentDomain}/s/sing-box/${emailMd5}" | qrencode -s 10 -m 1 -t UTF8
                         fi
