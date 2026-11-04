@@ -1,6 +1,5 @@
-# v2ray-agent
+# v2ray-agent Clean Secure Edition
 
-- [Thanks to JetBrains for providing non-commercial open source software development authorization](https://www.jetbrains.com/?from=v2ray-agent)
 
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
@@ -30,10 +29,13 @@ An installation and management script for Xray-core and sing-box, with regular h
 
 ## Quick Start
 
+
+Use a complete source checkout from the [fork](https://github.com/jhlxlml/v2ray-agent) at a reviewed commit. Install a reviewed acme.sh release first for TLS.
+
 ### Installation
 
 ```
-wget -P /root -N --no-check-certificate "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/install.sh" && chmod 700 /root/install.sh && /root/install.sh
+sudo bash shell/install_en.sh
 ```
 
 ### Usage
@@ -47,7 +49,7 @@ vasma
 ### Docker Reality
 
 ```
-wget -P /root -N --no-check-certificate "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/shell/docker_reality_en.sh" && chmod 700 /root/docker_reality_en.sh && /root/docker_reality_en.sh
+sudo bash shell/docker_reality_en.sh
 ```
 
 The Docker launcher supports Reality Vision, Reality XHTTP, or both modes. After installation, run `vasmad` to reopen its menu. See the [Docker Reality guide](https://www.v2ray-agent.com/archives/019e1b57-92b3-70ab-8919-cdf8c0bb4fe9).

@@ -1,6 +1,5 @@
-# v2ray-agent
+# v2ray-agent Clean Secure Edition
 
-- [感谢 JetBrains 提供的非商业开源软件开发授权](https://www.jetbrains.com/?from=v2ray-agent)
 
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
@@ -26,14 +25,17 @@
 ## 环境要求
 
 *   **脚本版:** Linux、root 权限，支持 CentOS、Debian、Ubuntu 和 Alpine；支持 amd64/x86_64、arm64/aarch64.
-*   **Docker Reality:** Linux、root 或 sudo 权限，以及正在运行的 Docker；脚本可在交互模式下提示安装 Docker.
+* **Docker Reality:** Linux、root 或 sudo 权限，预装并启动 Docker。
 
 ## 快速开始
+
+
+从 [当前 Fork](https://github.com/jhlxlml/v2ray-agent) 获取完整源码，在本地检出已审核的固定提交后执行。TLS 安装还需要预先安装经审核的 acme.sh。
 
 ### 安装脚本版
 
 ```
-wget -P /root -N --no-check-certificate "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/install.sh" && chmod 700 /root/install.sh && /root/install.sh
+sudo bash install.sh
 ```
 
 ### 使用
@@ -46,7 +48,7 @@ vasma
 
 ### 安装Docker版
 ```
-wget -P /root -N --no-check-certificate "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/shell/docker_reality.sh" && chmod 700 /root/docker_reality.sh && /root/docker_reality.sh
+sudo bash shell/docker_reality.sh
 ```
 
 ### 使用 

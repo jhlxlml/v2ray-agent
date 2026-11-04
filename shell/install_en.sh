@@ -268,7 +268,7 @@ initVar() {
     btDomain=
     # nginx configuration file path
     nginxConfigPath=/etc/nginx/conf.d/
-    nginxStaticPath=/usr/share/nginx/html/
+    nginxStaticPath=/etc/v2ray-agent/site/
 
     # Is it a preview version?
     prereleaseStatus=false
@@ -1417,7 +1417,7 @@ mkdirTools() {
 
     mkdir -p /etc/v2ray-agent/sing-box/conf/config
 
-    (umask 022; mkdir -p /usr/share/nginx/html/)
+    (umask 022; mkdir -p /etc/v2ray-agent/site/)
     chmod 711 /etc/v2ray-agent
     chmod 700 /etc/v2ray-agent/{tls,xray,sing-box,warp,subscribe_local,subscribe_remote}
     local privateDir
@@ -2385,61 +2385,39 @@ randomPathFunction() {
     echoContent skyBlue "\n----------------------------"
 }
 # 随机数
-randomNum() {
-    if [[ "${release}" == "alpine" ]]; then
-        local ranNum=
-        ranNum="$(shuf -i "$1"-"$2" -n 1)"
-        echo "${ranNum}"
-    else
-        echo $((RANDOM % $2 + $1))
-    fi
-}
 # Nginx disguise blog
+writeLocalCamouflagePage() (
+    umask 022
+    local style=${1:-1} title description tmp index="${nginxStaticPath%/}/index.html"
+    case "${style}" in
+        1) title='Welcome'; description='This site is under construction.' ;;
+        2) title='Field Notes'; description='Notes from the garden and the trail.' ;;
+        *) return 1 ;;
+    esac
+    mkdir -p -- "${nginxStaticPath}" || return 1
+    if [[ -e "${index}" || -L "${index}" ]]; then
+        [[ -f "${index}" && ! -L "${index}" ]] && grep -Fxq '<!-- Clean Secure local page -->' "${index}" || return 1
+    fi
+    tmp=$(mktemp "${nginxStaticPath%/}/.site.XXXXXX") || return 1
+    trap 'rm -f -- "${tmp}"' EXIT
+    cat >"${tmp}" <<EOF || return 1
+<!doctype html>
+<!-- Clean Secure local page -->
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${title}</title>
+<style>body{max-width:42rem;margin:12vh auto;padding:0 1.5rem;font:1rem/1.6 system-ui,sans-serif;color:#24332f;background:#f5f7f4}h1{font-weight:600}</style>
+<main><h1>${title}</h1><p>${description}</p></main>
+</html>
+EOF
+    chmod 644 "${tmp}" && mv -f -- "${tmp}" "${index}"
+)
+
 nginxBlog() {
-    if [[ -n "$1" ]]; then
-        echoContent skyBlue "\nProgress$1/${totalProgress}: Add fake site"
-    else
-        echoContent yellow "\n Add a cover website "
-    fi
-
-    if [[ -d "${nginxStaticPath}" && -f "${nginxStaticPath}/check" ]]; then
-        echo
-        if [[ -z "${lastInstallationConfig}" ]]; then
-            read -r -p "Detected installation of fake site, do you need to reinstall [y/n]:" nginxBlogInstallStatus
-        else
-            nginxBlogInstallStatus="n"
-        fi
-
-        if [[ "${nginxBlogInstallStatus}" == "y" ]]; then
-            rm -rf "${nginxStaticPath}*"
-            #  randomNum=$((RANDOM % 6 + 1))
-            randomNum=$(randomNum 1 9)
-            if [[ "${release}" == "alpine" ]]; then
-                wget -q -P "${nginxStaticPath}" "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/fodder/blog/unable/html${randomNum}.zip"
-            else
-                wget -q "${wgetShowProgressStatus}" -P "${nginxStaticPath}" "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/fodder/blog/unable/html${randomNum}.zip"
-            fi
-
-            unzip -o "${nginxStaticPath}html${randomNum}.zip" -d "${nginxStaticPath}" >/dev/null
-            rm -f "${nginxStaticPath}html${randomNum}.zip*"
-            echoContent green " ---> Added fake site successfully"
-        fi
-    else
-        randomNum=$(randomNum 1 9)
-        #        randomNum=$((RANDOM % 6 + 1))
-        rm -rf "${nginxStaticPath}*"
-
-        if [[ "${release}" == "alpine" ]]; then
-            wget -q -P "${nginxStaticPath}" "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/fodder/blog/unable/html${randomNum}.zip"
-        else
-            wget -q "${wgetShowProgressStatus}" -P "${nginxStaticPath}" "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/fodder/blog/unable/html${randomNum}.zip"
-        fi
-
-        unzip -o "${nginxStaticPath}html${randomNum}.zip" -d "${nginxStaticPath}" >/dev/null
-        rm -f "${nginxStaticPath}html${randomNum}.zip*"
-        echoContent green " ---> Added fake site successfully"
-    fi
-
+    local index="${nginxStaticPath%/}/index.html"
+    # Leave an existing administrator-managed page in place.
+    [[ -e "${index}" || -L "${index}" ]] || writeLocalCamouflagePage 1
 }
 
 # Modify http_port_t port
@@ -6659,15 +6637,8 @@ updateNginxBlog() {
     fi
     echoContent red "=============================================================="
     echoContent yellow "# If you need to customize, please manually copy the template file to ${nginxStaticPath} \n"
-    echoContent yellow "1.Newbie guide"
-    echoContent yellow "2.Game website"
-    echoContent yellow "3.Personal blog 01"
-    echoContent yellow "4.Enterprise Station"
-    echoContent yellow "5.Unlock encrypted music file template [https://github.com/ix64/unlock-music]"
-    echoContent yellow "6.mikutap[https://github.com/HFIProgramming/mikutap]"
-    echoContent yellow "7.Enterprise Station 02"
-    echoContent yellow "8.Personal blog 02"
-    echoContent yellow "9.404 automatically jumps to baidu"
+    echoContent yellow "1. Welcome"
+    echoContent yellow "2. Field Notes"
     echoContent yellow "10.302 redirect website"
     echoContent red "=============================================================="
     read -r -p "Please select:" selectInstallNginxBlogType
@@ -6706,21 +6677,11 @@ updateNginxBlog() {
             exit 0
         fi
     fi
-    if [[ "${selectInstallNginxBlogType}" =~ ^[1-9]$ ]]; then
-        rm -rf "${nginxStaticPath}*"
-
-        if [[ "${release}" == "alpine" ]]; then
-            wget -q -P "${nginxStaticPath}" "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/fodder/blog/unable/html${selectInstallNginxBlogType}.zip"
-        else
-            wget -q "${wgetShowProgressStatus}" -P "${nginxStaticPath}" "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/fodder/blog/unable/html${selectInstallNginxBlogType}.zip"
-        fi
-
-        unzip -o "${nginxStaticPath}html${selectInstallNginxBlogType}.zip" -d "${nginxStaticPath}" >/dev/null
-        rm -f "${nginxStaticPath}html${selectInstallNginxBlogType}.zip*"
-        echoContent green " ---> Pseudo site replaced successfully"
-    else
-        echoContent red " ---> Wrong selection, please select again"
-        updateNginxBlog
+    if [[ "${selectInstallNginxBlogType}" =~ ^[12]$ ]]; then
+        writeLocalCamouflagePage "${selectInstallNginxBlogType}" || {
+            echoContent red "Cannot replace a site managed outside Clean Secure Edition."
+            return 1
+        }
     fi
 }
 
@@ -7388,29 +7349,10 @@ removeUser() {
 }
 # update script
 updateV2RayAgent() {
-    echoContent skyBlue "\nProgress$1/${totalProgress}: Update v2ray-agent script"
-    local scriptTemp
-    scriptTemp=$(mktemp /etc/v2ray-agent/.install.XXXXXX) || return 1
-    if ! wget -q -O "${scriptTemp}" "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/shell/install_en.sh" ||
-        [[ ! -s "${scriptTemp}" ]] || ! bash -n "${scriptTemp}"; then
-        rm -f "${scriptTemp}"
-        echoContent red " ---> Script download or validation failed; keeping the current version"
-        return 1
-    fi
-    if ! chmod 700 "${scriptTemp}" || ! mv -f "${scriptTemp}" /etc/v2ray-agent/install.sh; then
-        rm -f "${scriptTemp}"
-        return 1
-    fi
-    local version
-    version=$(grep 'Current version: v' "/etc/v2ray-agent/install.sh" | awk -F "[v]" '{print $2}' | tail -n +2 | head -n 1 | awk -F "[\"]" '{print $1}')
-
-    echoContent green "\n ---> Update completed"
-    echoContent yellow " ---> Please manually execute [vasma] to open the script"
-    echoContent green " ---> Current version: ${version}\n"
-    echoContent yellow "If the update fails, please manually execute the following command\n"
-    echoContent skyBlue "wget -O /root/install.sh --no-check-certificate https://raw.githubusercontent.com/mack-a/v2ray-agent/master/shell/install_en.sh && chmod 700 /root/install.sh && /root/install.sh"
-    echo
-    exit 0
+    echoContent green "Clean Secure Edition clean.1 (upstream v3.5.37)"
+    echoContent yellow "Automatic updates are disabled. Check this fork for updates and review a fixed commit."
+    echoContent green "https://github.com/jhlxlml/v2ray-agent/tree/clean-secure"
+    return 0
 }
 
 # firewall
@@ -7528,29 +7470,40 @@ EOF
 }
 
 # Script shortcut
+installSubscriptionTemplate() {
+    local sourceDir template target=/etc/v2ray-agent/sing-box-client.json tmp
+    sourceDir=${1%/*}
+    for template in "${target}" "${sourceDir}/documents/sing-box.json" "${sourceDir}/../documents/sing-box.json"; do
+        [[ -f "${template}" && ! -L "${template}" ]] || continue
+        printf '%s  %s\n' '89e782cab9a017932193b5e7fba5e084575e389b70a9d7a7c50a52e312206e73' "${template}" | sha256sum -c --status || continue
+        [[ "${template}" != "${target}" ]] || return 0
+        tmp=$(mktemp /etc/v2ray-agent/.client-template.XXXXXX) || return 1
+        if cp -- "${template}" "${tmp}" &&
+            printf '%s  %s\n' '89e782cab9a017932193b5e7fba5e084575e389b70a9d7a7c50a52e312206e73' "${tmp}" | sha256sum -c --status &&
+            mv -f -- "${tmp}" "${target}"; then
+            return 0
+        fi
+        rm -f -- "${tmp}"
+        return 1
+    done
+    echoContent red "Missing verified documents/sing-box.json. Run from the reviewed source tree."
+    return 1
+}
+
 aliasInstall() {
-
-    if [[ -f "$HOME/install.sh" ]] && [[ -d "/etc/v2ray-agent" ]] && grep <"$HOME/install.sh" -q "Author: mack-a"; then
-        mv "$HOME/install.sh" /etc/v2ray-agent/install.sh
-        local vasmaType=
-        if [[ -d "/usr/bin/" ]]; then
-            if [[ ! -f "/usr/bin/vasma" ]]; then
-                ln -s /etc/v2ray-agent/install.sh /usr/bin/vasma
-                chmod 700 /usr/bin/vasma
-                vasmaType=true
-            fi
-
-        elif [[ -d "/usr/sbin" ]]; then
-            if [[ ! -f "/usr/sbin/vasma" ]]; then
-                ln -s /etc/v2ray-agent/install.sh /usr/sbin/vasma
-                chmod 700 /usr/sbin/vasma
-                vasmaType=true
-            fi
-        fi
-        if [[ "${vasmaType}" == "true" ]]; then
-            echoContent green "The shortcut is created successfully, you can execute [vasma] to reopen the script"
-        fi
+    local source target=/etc/v2ray-agent/install.sh shortcut
+    source=$(realpath -- "${BASH_SOURCE[0]}") || return 1
+    installSubscriptionTemplate "${source}" || return 1
+    if [[ ! -e "${target}" && ! -L "${target}" ]]; then
+        (set -o noclobber; cat -- "${source}" >"${target}") && chmod 700 "${target}" || return 1
     fi
+    for shortcut in /usr/bin/vasma /usr/sbin/vasma; do
+        [[ -d "${shortcut%/*}" ]] || continue
+        if [[ ! -e "${shortcut}" && ! -L "${shortcut}" ]]; then
+            ln -s "${target}" "${shortcut}" || return 1
+        fi
+        break
+    done
 }
 
 # Check ipv6, ipv4
@@ -10549,7 +10502,7 @@ customXrayInstall() {
         if [[ -n "${btDomain}" ]] || ! xraySelectionNeedsNginx "${selectCustomInstallType}"; then
             echoContent skyBlue "\nProgress 6/${totalProgress}: Pagoda panel detected, skipping disguised website"
         else
-            nginxBlog 6
+            nginxBlog 6 || return 1
         fi
         if xraySelectionNeedsNginx "${selectCustomInstallType}"; then
             updateRedirectNginxConf
@@ -10644,7 +10597,7 @@ xrayCoreInstall() {
     if [[ -n "${btDomain}" ]]; then
         echoContent skyBlue "\nProgress 11/${totalProgress}: Pagoda panel detected, skipping disguised website"
     else
-        nginxBlog 10
+        nginxBlog 10 || return 1
     fi
     updateRedirectNginxConf
 
@@ -10794,7 +10747,7 @@ installSubscribe() {
         mapfile -t result < <(initSingBoxPort "${subscribePort}")
         echo
         echoContent yellow " ---> Configure the subscription cover website \n"
-        nginxBlog
+        nginxBlog || return 1
         echo
         local httpSubscribeStatus=
 
@@ -11157,133 +11110,133 @@ rule-providers:
     type: http
     behavior: classical
     interval: 86400
-    url: https://gh-proxy.com/https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Lan/Lan.yaml
+    url: https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Lan/Lan.yaml
     path: ./Rules/lan.yaml
   reject:
     type: http
     behavior: domain
-    url: https://gh-proxy.com/https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/reject.txt
+    url: https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/reject.txt
     path: ./ruleset/reject.yaml
     interval: 86400
   proxy:
     type: http
     behavior: domain
-    url: https://gh-proxy.com/https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/proxy.txt
+    url: https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/proxy.txt
     path: ./ruleset/proxy.yaml
     interval: 86400
   direct:
     type: http
     behavior: domain
-    url: https://gh-proxy.com/https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/direct.txt
+    url: https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/direct.txt
     path: ./ruleset/direct.yaml
     interval: 86400
   private:
     type: http
     behavior: domain
-    url: https://gh-proxy.com/https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/private.txt
+    url: https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/private.txt
     path: ./ruleset/private.yaml
     interval: 86400
   gfw:
     type: http
     behavior: domain
-    url: https://gh-proxy.com/https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/gfw.txt
+    url: https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/gfw.txt
     path: ./ruleset/gfw.yaml
     interval: 86400
   greatfire:
     type: http
     behavior: domain
-    url: https://gh-proxy.com/https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/greatfire.txt
+    url: https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/greatfire.txt
     path: ./ruleset/greatfire.yaml
     interval: 86400
   tld-not-cn:
     type: http
     behavior: domain
-    url: https://gh-proxy.com/https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/tld-not-cn.txt
+    url: https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/tld-not-cn.txt
     path: ./ruleset/tld-not-cn.yaml
     interval: 86400
   telegramcidr:
     type: http
     behavior: ipcidr
-    url: https://gh-proxy.com/https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/telegramcidr.txt
+    url: https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/telegramcidr.txt
     path: ./ruleset/telegramcidr.yaml
     interval: 86400
   applications:
     type: http
     behavior: classical
-    url: https://gh-proxy.com/https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/applications.txt
+    url: https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/applications.txt
     path: ./ruleset/applications.yaml
     interval: 86400
   Disney:
     type: http
     behavior: classical
-    url: https://gh-proxy.com/https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Disney/Disney.yaml
+    url: https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Disney/Disney.yaml
     path: ./ruleset/disney.yaml
     interval: 86400
   Netflix:
     type: http
     behavior: classical
-    url: https://gh-proxy.com/https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Netflix/Netflix.yaml
+    url: https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Netflix/Netflix.yaml
     path: ./ruleset/netflix.yaml
     interval: 86400
   YouTube:
     type: http
     behavior: classical
-    url: https://gh-proxy.com/https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/YouTube/YouTube.yaml
+    url: https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/YouTube/YouTube.yaml
     path: ./ruleset/youtube.yaml
     interval: 86400
   HBO:
     type: http
     behavior: classical
-    url: https://gh-proxy.com/https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/HBO/HBO.yaml
+    url: https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/HBO/HBO.yaml
     path: ./ruleset/hbo.yaml
     interval: 86400
   OpenAI:
     type: http
     behavior: classical
-    url: https://gh-proxy.com/https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/OpenAI/OpenAI.yaml
+    url: https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/OpenAI/OpenAI.yaml
     path: ./ruleset/openai.yaml
     interval: 86400
   ClaudeAI:
     type: http
     behavior: classical
-    url: https://gh-proxy.com/https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Claude/Claude.yaml
+    url: https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Claude/Claude.yaml
     path: ./ruleset/claudeai.yaml
     interval: 86400
   Bing:
     type: http
     behavior: classical
-    url: https://gh-proxy.com/https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Bing/Bing.yaml
+    url: https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Bing/Bing.yaml
     path: ./ruleset/bing.yaml
     interval: 86400
   Google:
     type: http
     behavior: classical
-    url: https://gh-proxy.com/https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Google/Google.yaml
+    url: https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Google/Google.yaml
     path: ./ruleset/google.yaml
     interval: 86400
   GitHub:
     type: http
     behavior: classical
-    url: https://gh-proxy.com/https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/GitHub/GitHub.yaml
+    url: https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/GitHub/GitHub.yaml
     path: ./ruleset/github.yaml
     interval: 86400
   Spotify:
     type: http
     behavior: classical
-    url: https://gh-proxy.com/https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Spotify/Spotify.yaml
+    url: https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Spotify/Spotify.yaml
     path: ./ruleset/spotify.yaml
     interval: 86400
   ChinaMaxDomain:
     type: http
     behavior: domain
     interval: 86400
-    url: https://gh-proxy.com/https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/ChinaMax/ChinaMax_Domain.yaml
+    url: https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/ChinaMax/ChinaMax_Domain.yaml
     path: ./Rules/ChinaMaxDomain.yaml
   ChinaMaxIPNoIPv6:
     type: http
     behavior: ipcidr
     interval: 86400
-    url: https://gh-proxy.com/https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/ChinaMax/ChinaMax_IP_No_IPv6.yaml
+    url: https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/ChinaMax/ChinaMax_IP_No_IPv6.yaml
     path: ./Rules/ChinaMaxIPNoIPv6.yaml
 rules:
   - RULE-SET,YouTube,YouTube,no-resolve
@@ -11491,18 +11444,10 @@ subscribe() (
                     cp "/etc/v2ray-agent/subscribe_local/sing-box/${email}" "${subscribePublishPath}/sing-box_profiles/${emailMd5}" || return 1
                     chmod 644 "${subscribePublishPath}/sing-box_profiles/${emailMd5}" || return 1
 
-                    echoContent skyBlue " ---> Download sing-box generic configuration file "
-                    if [[ "${release}" == "alpine" ]]; then
-                        wget -O "${subscribePublishPath}/sing-box/${emailMd5}_download" -q "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/documents/sing-box.json" || return 1
-                    else
-                        wget -O "${subscribePublishPath}/sing-box/${emailMd5}_download" -q "${wgetShowProgressStatus}" "https://raw.githubusercontent.com/mack-a/v2ray-agent/master/documents/sing-box.json" || return 1
-                    fi
-
                     jq --slurpfile nodes "/etc/v2ray-agent/subscribe_local/sing-box/${email}" '
                       .outbounds |= (map(if has("outbounds") then .outbounds += ($nodes[0] | map(.tag)) else . end) + $nodes[0])' \
-                        "${subscribePublishPath}/sing-box/${emailMd5}_download" >"${subscribePublishPath}/sing-box/${emailMd5}_tmp" &&
+                        /etc/v2ray-agent/sing-box-client.json >"${subscribePublishPath}/sing-box/${emailMd5}_tmp" &&
                         mv -f "${subscribePublishPath}/sing-box/${emailMd5}_tmp" "${subscribePublishPath}/sing-box/${emailMd5}" || return 1
-                    rm -f "${subscribePublishPath}/sing-box/${emailMd5}_download"
                 fi
                 if [[ -z "${showStatus}" ]]; then
                     echoContent skyBlue "\n----------Default subscription----------\n"
@@ -12170,7 +12115,7 @@ menu() {
     cd "$HOME" || exit
     echoContent red "\n=============================================================="
     echoContent green "Author: mack-a"
-    echoContent green " Current version: v3.5.37"
+    echoContent green "Clean Secure Edition clean.1 (upstream v3.5.37)"
     echoContent green "Github：https://github.com/mack-a/v2ray-agent"
     echoContent green "Description: 8-in-1 coexistence script\c"
     showInstallStatus
@@ -12198,13 +12143,13 @@ menu() {
     echoContent yellow "15.Domain name blacklist"
     echoContent skyBlue "-------------------------Version Management-------------------- ---------"
     echoContent yellow "16.core management"
-    echoContent yellow "17.Update script"
-    echoContent yellow "18.Install BBR and DD scripts"
+    echoContent yellow "17.Check script updates"
+    echoContent yellow "18.BBR setup guidance"
     echoContent skyBlue "-------------------------Script Management-------------------- --- ------"
     echoContent yellow "19.View log"
     echoContent red "=============================================================="
     mkdirTools
-    aliasInstall
+    aliasInstall || return 1
     read -r -p "Please select:" selectInstallType
     case ${selectInstallType} in
     1)

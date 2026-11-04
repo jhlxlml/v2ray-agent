@@ -839,53 +839,20 @@ checkEnvironment() {
 
 # selfInstallShortcut — 参考 install.sh 的 aliasInstall 逻辑，为本脚本创建稳定位置与 vasmad 快捷方式。
 selfInstallShortcut() {
-    local targetScript="/etc/v2ray-agent/docker_reality.sh"
-    local currentScript=""
-    local shortcutCreated="false"
-
-    if [[ "${skipSelfInstall}" == "1" ]]; then
-        return 0
+    [[ "${skipSelfInstall}" != 1 ]] || return 0
+    local target=/etc/v2ray-agent/docker_reality.sh shortcut source
+    source=$(realpath -- "${BASH_SOURCE[0]}") || return 1
+    mkdir -p /etc/v2ray-agent || return 1
+    if [[ ! -e "${target}" && ! -L "${target}" ]]; then
+        (set -o noclobber; cat -- "${source}" >"${target}") && chmod 700 "${target}" || return 1
     fi
-
-    currentScript=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$0" 2>/dev/null || true)
-    if [[ -z "${currentScript}" ]]; then
-        currentScript="$0"
-    fi
-
-    mkdir -p /etc/v2ray-agent
-
-    if [[ "${currentScript}" != "${targetScript}" ]]; then
-        if ! mv "${currentScript}" "${targetScript}" 2>/dev/null; then
-            echoContent "yellow" "无法自动移动脚本到 ${targetScript}，继续使用当前路径运行。"
-        else
-            chmod 700 "${targetScript}"
-            currentScript="${targetScript}"
-            echoContent "green" "脚本已移动到 ${targetScript}"
+    for shortcut in /usr/bin/vasmad /usr/sbin/vasmad; do
+        [[ -d "${shortcut%/*}" ]] || continue
+        if [[ ! -e "${shortcut}" && ! -L "${shortcut}" ]]; then
+            ln -s "${target}" "${shortcut}" || return 1
         fi
-    else
-        chmod 700 "${targetScript}"
-    fi
-
-    if [[ -f "${targetScript}" ]]; then
-        if [[ -d "/usr/bin/" ]]; then
-            rm -f /usr/bin/vasmad
-            ln -s "${targetScript}" /usr/bin/vasmad
-            chmod 700 /usr/bin/vasmad
-            shortcutCreated="true"
-        fi
-
-        if [[ -d "/usr/sbin/" ]]; then
-            rm -f /usr/sbin/vasmad
-            ln -s "${targetScript}" /usr/sbin/vasmad
-            chmod 700 /usr/sbin/vasmad
-            shortcutCreated="true"
-        fi
-    fi
-
-    if [[ "${shortcutCreated}" == "true" ]]; then
-        echoContent "green" "快捷方式创建成功，可执行 [vasmad] 重新打开脚本"
-        echoContent "yellow" "启动方式：vasmad"
-    fi
+        break
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -1649,7 +1616,8 @@ promptExistingInstallAction() {
 
     echoContent "skyBlue" ""
     echoContent green "作者：mack-a"
-    echoContent green "当前版本：v0.0.1"
+    echoContent green "Clean Secure Edition clean.1"
+echoContent green "当前版本：v0.0.1"
     echoContent green "Github：https://github.com/mack-a/v2ray-agent"
     echoContent green "描述：八合一docker版"
     if [[ ${hasConfig} -ne 0 && ${hasContainer} -ne 0 ]]; then
@@ -2467,7 +2435,7 @@ main() {
     fi
 
     checkEnvironment
-    selfInstallShortcut
+    selfInstallShortcut || return 1
     checkDocker || return 1
     promptExistingInstallAction
     promptInteractiveValues

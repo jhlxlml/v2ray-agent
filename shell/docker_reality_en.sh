@@ -838,53 +838,20 @@ checkEnvironment() {
 
 # selfInstallShortcut — mirror install.sh aliasInstall behavior for this standalone script and create the vasmad shortcut.
 selfInstallShortcut() {
-    local targetScript="/etc/v2ray-agent/docker_reality_en.sh"
-    local currentScript=""
-    local shortcutCreated="false"
-
-    if [[ "${skipSelfInstall}" == "1" ]]; then
-        return 0
+    [[ "${skipSelfInstall}" != 1 ]] || return 0
+    local target=/etc/v2ray-agent/docker_reality.sh shortcut source
+    source=$(realpath -- "${BASH_SOURCE[0]}") || return 1
+    mkdir -p /etc/v2ray-agent || return 1
+    if [[ ! -e "${target}" && ! -L "${target}" ]]; then
+        (set -o noclobber; cat -- "${source}" >"${target}") && chmod 700 "${target}" || return 1
     fi
-
-    currentScript=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$0" 2>/dev/null || true)
-    if [[ -z "${currentScript}" ]]; then
-        currentScript="$0"
-    fi
-
-    mkdir -p /etc/v2ray-agent
-
-    if [[ "${currentScript}" != "${targetScript}" ]]; then
-        if ! mv "${currentScript}" "${targetScript}" 2>/dev/null; then
-            echoContent "yellow" "Unable to move the script automatically to ${targetScript}; continuing from the current path."
-        else
-            chmod 700 "${targetScript}"
-            currentScript="${targetScript}"
-            echoContent "green" "Script moved to ${targetScript}"
+    for shortcut in /usr/bin/vasmad /usr/sbin/vasmad; do
+        [[ -d "${shortcut%/*}" ]] || continue
+        if [[ ! -e "${shortcut}" && ! -L "${shortcut}" ]]; then
+            ln -s "${target}" "${shortcut}" || return 1
         fi
-    else
-        chmod 700 "${targetScript}"
-    fi
-
-    if [[ -f "${targetScript}" ]]; then
-        if [[ -d "/usr/bin/" ]]; then
-            rm -f /usr/bin/vasmad
-            ln -s "${targetScript}" /usr/bin/vasmad
-            chmod 700 /usr/bin/vasmad
-            shortcutCreated="true"
-        fi
-
-        if [[ -d "/usr/sbin/" ]]; then
-            rm -f /usr/sbin/vasmad
-            ln -s "${targetScript}" /usr/sbin/vasmad
-            chmod 700 /usr/sbin/vasmad
-            shortcutCreated="true"
-        fi
-    fi
-
-    if [[ "${shortcutCreated}" == "true" ]]; then
-        echoContent "green" "Shortcut created successfully. Execute [vasmad] to reopen the script"
-        echoContent "yellow" "Launch command: vasmad"
-    fi
+        break
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -2446,7 +2413,7 @@ main() {
     fi
 
     checkEnvironment
-    selfInstallShortcut
+    selfInstallShortcut || return 1
     checkDocker || return 1
     promptExistingInstallAction
     promptInteractiveValues
