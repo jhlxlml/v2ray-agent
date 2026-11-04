@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+
+umask 077
 installType='yum -y install'
 upgrade="yum -y update"
 echoType='echo -e'
@@ -82,7 +84,6 @@ installTools(){
         echoColor yellow "\nacme.sh未安装，安装中\n"
         echoColor red "Install a reviewed acme.sh release in $HOME/.acme.sh first."
         exit 1
-        echoColor green "acme.sh安装完毕\n"
     else
         echoColor green "acme.sh已安装\n"
     fi
@@ -90,7 +91,7 @@ installTools(){
 }
 # 恢复配置
 resetNginxConfig(){
-    if ! cp -f /tmp/mack-a/nginx/nginx.conf /etc/nginx/nginx.conf; then
+    if ! cp -p -- "${tlsWorkDir}/nginx.conf" /etc/nginx/nginx.conf; then
         echoColor red "Nginx配置恢复失败，请检查备份文件\n"
         return 1
     fi
@@ -99,8 +100,8 @@ resetNginxConfig(){
 }
 # 备份
 bakConfig(){
-    mkdir -p /tmp/mack-a/nginx || return 1
-    cp -f /etc/nginx/nginx.conf /tmp/mack-a/nginx/nginx.conf
+    tlsWorkDir=$(mktemp -d "${TMPDIR:-/tmp}/vasma-tls.XXXXXX") || return 1
+    cp -p -- /etc/nginx/nginx.conf "${tlsWorkDir}/nginx.conf"
 }
 # 检查Nginx服务是否运行
 isNginxRunning(){
@@ -144,6 +145,14 @@ installTLS(){
         fi
         echoColor red "域名未填写\n"
     done
+    if [[ ! "${domain}" =~ ^([a-zA-Z0-9-]+\.)+[a-zA-Z0-9-]+$ ]]; then
+        echoColor red "域名格式错误"
+        return 1
+    fi
+    if [[ -e /etc/nginx/conf.d/5NX2O9XQKP.conf || -L /etc/nginx/conf.d/5NX2O9XQKP.conf ]]; then
+        echoColor red "已存在临时 Nginx 配置，请检查后重试"
+        return 1
+    fi
     # 备份
     if ! bakConfig; then
         echoColor red "Nginx配置备份失败，退出证书申请\n"
@@ -155,7 +164,6 @@ installTLS(){
         sed -i "s/${domain}/X655Y0M9UM9/g" /etc/nginx/nginx.conf
     fi
 
-    touch /etc/nginx/conf.d/6GFV1ES52V2.conf
     echo "server {listen 80;server_name ${domain};root /usr/share/nginx/html;location ~ /.well-known {allow all;}location /test {return 200 '5NX2O9XQKP';}}" > /etc/nginx/conf.d/5NX2O9XQKP.conf
     local nginxStatus=1
     if isNginxRunning
@@ -194,25 +202,25 @@ installTLS(){
         restoreNginxState
         return 1
     fi
-    if ! ~/.acme.sh/acme.sh --installcert -d "${domain}" --fullchainpath "/tmp/mack-a/nginx/${domain}.crt" --keypath "/tmp/mack-a/nginx/${domain}.key" --ecc >/dev/null; then
+    if ! ~/.acme.sh/acme.sh --installcert -d "${domain}" --fullchainpath "${tlsWorkDir}/${domain}.crt" --keypath "${tlsWorkDir}/${domain}.key" --ecc >/dev/null; then
         echoColor red "证书安装失败，请检查acme日志\n"
         restoreNginxState
         return 1
     fi
-    if [[ ! -s /tmp/mack-a/nginx/${domain}.key ]]
+    if [[ ! -s ${tlsWorkDir}/${domain}.key ]]
     then
         echoColor red "证书key生成失败，请重新运行"
         restoreNginxState
         return 1
-    elif [[ ! -s /tmp/mack-a/nginx/${domain}.crt ]]
+    elif [[ ! -s ${tlsWorkDir}/${domain}.crt ]]
     then
         echoColor red "证书crt生成失败，请重新运行"
         restoreNginxState
         return 1
     fi
     echoColor green "证书生成成功"
-    echoColor green "证书目录/tmp/mack-a/nginx"
-    ls /tmp/mack-a/nginx
+    echoColor green "证书目录${tlsWorkDir}"
+    ls -- "${tlsWorkDir}"
 
     restoreNginxState
 }
@@ -222,11 +230,11 @@ init(){
     echoColor yellow "此脚本注意事项"
     echoColor green "   1.会安装依赖所需依赖"
     echoColor green "   2.会把Nginx配置文件备份"
-    echoColor green "   3.会安装Nginx、acme.sh，如果已安装则使用已经存在的"
+    echoColor green "   3.会安装 Nginx；请先安装经审核的 acme.sh"
     echoColor green "   4.安装完毕或者安装失败会自动恢复备份，请不要手动关闭脚本"
     echoColor green "   5.执行期间请不要重启机器"
     echoColor green "   6.备份文件和证书文件都在/tmp下面，请注意留存"
-    echoColor green "   7.如果多次执行则将上次生成备份和生成的证书强制覆盖"
+    echoColor green "   7.每次运行使用独立的临时目录"
     echoColor green "   8.证书默认ec-256"
     echoColor green "   9.下个版本会加入通配符证书生成[todo]"
     echoColor green "   10.可以生成多个不同域名的证书[包含子域名]，具体速率请查看[https://letsencrypt.org/zh-cn/docs/rate-limits/]"
@@ -237,12 +245,16 @@ init(){
     read -r isExecStatus
     if [[ ${isExecStatus} = "y" ]]
     then
-        installTools
+        installTools || return 1
         installTLS
     else
         echoColor green "欢迎下次使用"
         exit
     fi
 }
+if (( EUID != 0 )); then
+    echoColor red "请使用 root 运行"
+    exit 1
+fi
 checkSystem
 init

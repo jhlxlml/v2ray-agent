@@ -5,14 +5,9 @@ fodder/.DS_Store
 .DS_Store
 GEMINI.md
 GEMINI.zh-CN.md
-AGENTS.md
 .worktrees/
-docs
 .playwright-mcp
 .sisyphus
-tests
-test
-checks
 /.superpowers/
 /documents/issue*
 /documents/socks5-multi-outbound-routing-design.md

@@ -546,8 +546,16 @@ generateSubscribeSalt() {
     fi
 }
 
+prepareDockerImage() {
+    local image=$1
+    if [[ "${VASMA_OFFLINE:-0}" == 1 ]]; then
+        docker image inspect "${image}" >/dev/null
+    else
+        docker pull "${image}" >/dev/null
+    fi
+}
+
 startSubscribeContainer() {
-    local displayAddress="$1"
     local containerName="v2ray-agent-docker-subscribe"
     local nginxImage="nginx:alpine"
     local activePort="${persistedSubscribePort:-${resolvedSubscribePort}}"
@@ -575,12 +583,12 @@ server {
 }
 EOF
 
-    docker pull "${nginxImage}" >/dev/null 2>&1 || return 1
+    prepareDockerImage "${nginxImage}" || return 1
     if docker ps -a --filter "name=^/${containerName}$" --format '{{.Names}}' | grep -q "^${containerName}$"; then
         ownsDockerContainer "${containerName}" || return 1
         docker rm -f "${containerName}" >/dev/null 2>&1 || return 1
     fi
-    if ! docker run -d \
+    if ! docker run --pull never -d \
         --name "${containerName}" \
         --label "org.v2ray-agent.data-dir=${dataDir%/}" \
         --restart unless-stopped \
@@ -909,10 +917,10 @@ xrayImagePreflight() {
     fi
 
     echoContent "white" "Pulling Xray image ${xrayImage} (if not cached)..."
-    docker pull "${xrayImage}" >/dev/null 2>&1 || return 1
+    prepareDockerImage "${xrayImage}" || return 1
 
     echoContent "white" "Validating config: docker run --rm --user root -v \"${configFile}:/usr/local/etc/xray/config.json:ro\" ${xrayImage} run -test -c /usr/local/etc/xray/config.json"
-    if docker run --rm \
+    if docker run --pull never --rm \
         --user root \
         -v "${configFile}:/usr/local/etc/xray/config.json:ro" \
         "${xrayImage}" \
@@ -1108,7 +1116,7 @@ deriveEmail() {
 # _xrayDockerRuntime — return the docker-run command prefix for the Xray image.
 # This is the pre-checked runtime path used in value generation (no host binary assumed).
 _xrayDockerRuntime() {
-    printf '%s' "docker run --rm ghcr.io/xtls/xray-core:26.5.9"
+    printf '%s' "docker run --rm --pull never ghcr.io/xtls/xray-core:26.5.9"
 }
 
 # loadPersistedSummaryIfPresent — optionally read and validate client-summary.txt.
@@ -1341,7 +1349,7 @@ getPublicIP() {
         printf '%s\n' "${address}"
         return
     fi
-    if [[ "${VASMA_DISABLE_IP_LOOKUP:-0}" == 1 ]]; then
+    if [[ "${VASMA_DISABLE_IP_LOOKUP:-0}" == 1 || "${VASMA_OFFLINE:-0}" == 1 ]]; then
         return 0
     fi
 
@@ -1854,7 +1862,7 @@ showEnglishSubscriptionSection() {
     if [[ -n "${clashPublicFile}" ]]; then
         chmod 644 "${clashPublicFile}" "${clashProfileFile}" || return 1
     fi
-    startSubscribeContainer "${displayAddress}" || return 1
+    startSubscribeContainer || return 1
 
     echoContent "skyBlue" "============================= Default subscription =============================="
     echoContent "white" "Plain HTTP subscription transport can expose UUID, Reality parameters, SNI, path, ports, and connection details."
@@ -2259,10 +2267,12 @@ startContainer() {
 
     # --- Validate config using directory mount ---
     echoContent "white" "Pulling Xray image ${xrayImage} (if not cached)..."
-    docker pull "${xrayImage}" >/dev/null 2>&1 || return 1
+    if [[ "${startOnly}" == 1 ]]; then
+        prepareDockerImage "${xrayImage}" || return 1
+    fi
 
     echoContent "white" "Validating config with Xray image (directory mount)..."
-    if ! docker run --rm \
+    if ! docker run --pull never --rm \
         --user root \
         -v "${configFile}:/usr/local/etc/xray/config.json:ro" \
         "${xrayImage}" \
@@ -2308,7 +2318,7 @@ startContainer() {
     fi
 
     echoContent "white" "Starting container ${containerName} (ports: ${portArgs[*]})..."
-    if ! docker run -d \
+    if ! docker run --pull never -d \
         --name "${containerName}" \
         --label "org.v2ray-agent.data-dir=${dataDir%/}" \
         --restart unless-stopped \
@@ -2338,7 +2348,7 @@ showAccountInfo() {
     local displayAddress=""
 
     loadPersistedAccountInfo
-    displayAddress="$(getPublicIP)"
+    displayAddress="$(getPublicIP "")"
 
     local shortId="${persistedShortId:-6ba85179e30d4fc2}"
     local mode="${persistedInstallMode}"
@@ -2377,7 +2387,7 @@ showSubscriptionInfo() {
 
     loadPersistedAccountInfo
     ensureSubscribeRuntimeValues
-    displayAddress="$(getPublicIP)"
+    displayAddress="$(getPublicIP "")"
     shortId="${persistedShortId:-6ba85179e30d4fc2}"
     mode="${persistedInstallMode}"
 
@@ -2419,6 +2429,7 @@ main() {
     promptInteractiveValues
 
     if [[ "${startOnly}" != "1" ]]; then
+        prepareDockerImage ghcr.io/xtls/xray-core:26.5.9 || return 1
         generateConfig || return 1
     fi
 

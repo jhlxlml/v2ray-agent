@@ -100,14 +100,14 @@ checkCPUVendor() {
             'amd64' | 'x86_64')
                 xrayCoreCPUVendor="Xray-linux-64"
                 #                v2rayCoreCPUVendor="v2ray-linux-64"
-                warpRegCoreCPUVendor="main-linux-amd64"
+
                 singBoxCoreCPUVendor="-linux-amd64"
                 ;;
             'armv8' | 'aarch64')
                 cpuVendor="arm"
                 xrayCoreCPUVendor="Xray-linux-arm64-v8a"
                 #                v2rayCoreCPUVendor="v2ray-linux-arm64-v8a"
-                warpRegCoreCPUVendor="main-linux-arm64"
+
                 singBoxCoreCPUVendor="-linux-arm64"
                 ;;
             *)
@@ -133,7 +133,7 @@ initVar() {
 
     # 核心支持的cpu版本
     xrayCoreCPUVendor=""
-    warpRegCoreCPUVendor=""
+
     cpuVendor=""
 
     # 域名
@@ -978,10 +978,7 @@ check1Panel() {
 
 # 检查防火墙
 allowPort() {
-    local type=$2
-    if [[ -z "${type}" ]]; then
-        type=tcp
-    fi
+    local type=${2:-tcp}
     # 如果防火墙启动状态则添加相应的开放端口
     if command -v dpkg >/dev/null 2>&1 && dpkg -l | grep -q "^[[:space:]]*ii[[:space:]]\+ufw"; then
         if ufw status | grep -q "Status: active"; then
@@ -1046,7 +1043,7 @@ getPublicIP() {
         printf '%s\n' "${currentHost}"
         return
     fi
-    if [[ "${VASMA_DISABLE_IP_LOOKUP:-0}" == 1 ]]; then
+    if [[ "${VASMA_DISABLE_IP_LOOKUP:-0}" == 1 || "${VASMA_OFFLINE:-0}" == 1 ]]; then
         return 0
     fi
 
@@ -1423,7 +1420,7 @@ mkdirTools() {
     chmod 700 /etc/v2ray-agent/{tls,xray,sing-box,warp,subscribe_local,subscribe_remote}
     local privateDir
     for privateDir in tls xray/conf sing-box/conf warp subscribe_local subscribe_remote; do
-        find -P "/etc/v2ray-agent/${privateDir}" -type f ! -perm /111 -exec chmod 600 {} +
+        find "/etc/v2ray-agent/${privateDir}" -type f ! -perm /111 -exec chmod 600 {} +
     done
 }
 # 检测root
@@ -1435,6 +1432,16 @@ checkRoot() {
 }
 # 安装工具包
 installTools() {
+    if [[ "${VASMA_OFFLINE:-0}" == 1 ]]; then
+        local tool
+        for tool in curl dig jq lsof nginx openssl sha256sum; do
+            command -v "${tool}" >/dev/null 2>&1 || {
+                echoContent red "Offline prerequisite missing: ${tool}"
+                return 1
+            }
+        done
+        return 0
+    fi
     echoContent skyBlue "\n进度  $1/${totalProgress} : 安装工具"
     # installTools 可能在 menu() 创建其余目录之前运行。
     mkdir -p /etc/v2ray-agent
@@ -1455,7 +1462,6 @@ installTools() {
     fi
 
     if [[ "${release}" == "centos" ]]; then
-        rm -f /var/run/yum.pid
         ${installType} epel-release >/dev/null 2>&1
     fi
 
@@ -1498,7 +1504,7 @@ installTools() {
         ${installType} tar >/dev/null 2>&1
     fi
 
-    if ! crontab -l >/dev/null 2>&1; then
+    if ! command -v crontab >/dev/null 2>&1; then
         echoContent green " ---> 安装crontabs"
         if [[ "${release}" == "ubuntu" || "${release}" == "debian" ]]; then
             ${installType} cron >/dev/null 2>&1
@@ -1603,7 +1609,7 @@ installTools() {
     #        fi
     #    fi
 
-    if [[ "${selectCustomInstallType}" == "7" ]]; then
+    if [[ "${selectCustomInstallType}" =~ ^,?(7|8|12)(,(7|8|12))*,?$ ]]; then
         echoContent green " ---> 检测到无需依赖证书的服务，跳过安装"
     else
         if [[ ! -x "$HOME/.acme.sh/acme.sh" ]]; then
@@ -1719,7 +1725,7 @@ checkPortOpen() {
         touch ${nginxConfigPath}checkPortOpen.conf
         local listenIPv6PortConfig=
 
-        if [[ -n $(getPublicIP 6) ]]; then
+        if hasLocalIPv6; then
             listenIPv6PortConfig="listen [::]:${port};"
         fi
         cat <<EOF >${nginxConfigPath}checkPortOpen.conf
@@ -2304,8 +2310,7 @@ installTLS() {
                     echoContent yellow " ---> 如未过期或者自定义证书请选择[n]\n"
                     read -r -p "是否重新安装？[y/n]:" reInstallStatus
                     if [[ "${reInstallStatus}" == "y" ]]; then
-                        rm -rf /etc/v2ray-agent/tls/*
-                        installTLS "$1"
+                        echoContent yellow "Use the certificate management menu to renew this certificate."
                     fi
                 fi
             fi
@@ -2432,7 +2437,7 @@ writeLocalCamouflagePage() (
 <main><h1>${title}</h1><p>${description}</p></main>
 </html>
 EOF
-    chmod 644 "${tmp}" && mv -f -- "${tmp}" "${index}"
+    chmod 644 "${tmp}" && mv -fT -- "${tmp}" "${index}"
 )
 
 nginxBlog() {
@@ -2717,12 +2722,12 @@ installCoreRelease() (
     mkdir -p "${coreDir}" || return 1
     tmpDir=$(mktemp -d "${coreDir}/.release.XXXXXX") || return 1
     trap 'rm -rf -- "${tmpDir}"' EXIT
-    curl -q -fsSL --proto '=https' --proto-redir '=https' --max-time 300 \
-        -o "${tmpDir}/${asset}" "https://github.com/${repo}/releases/download/${version}/${asset}" &&
-        verifyReleaseAsset "${repo}" "${version}" "${asset}" "${tmpDir}/${asset}" || {
-            echoContent red "Release asset verification failed: ${repo} ${version} ${asset}"
-            return 1
-        }
+    if ! curl -q -fsSL --proto '=https' --proto-redir '=https' --max-time 300 \
+        -o "${tmpDir}/${asset}" "https://github.com/${repo}/releases/download/${version}/${asset}" ||
+        ! verifyReleaseAsset "${repo}" "${version}" "${asset}" "${tmpDir}/${asset}"; then
+        echoContent red "Release asset verification failed: ${repo} ${version} ${asset}"
+        return 1
+    fi
     if [[ "${core}" == sing-box ]]; then
         tar -xzf "${tmpDir}/${asset}" -C "${tmpDir}" "${binary}" || return 1
     else
@@ -2734,6 +2739,13 @@ installCoreRelease() (
 
 # 安装 sing-box
 installSingBox() {
+    if [[ "${VASMA_OFFLINE:-0}" == 1 ]]; then
+        [[ -x /etc/v2ray-agent/sing-box/sing-box ]] || {
+            echoContent red "Preinstall the reviewed core binary for offline use."
+            return 1
+        }
+        return 0
+    fi
     readInstallType
     echoContent skyBlue "\n进度  $1/${totalProgress} : 安装sing-box"
 
@@ -2779,6 +2791,13 @@ checkWgetShowProgress() {
 }
 # 安装xray
 installXray() {
+    if [[ "${VASMA_OFFLINE:-0}" == 1 ]]; then
+        [[ -x /etc/v2ray-agent/xray/xray ]] || {
+            echoContent red "Preinstall the reviewed core binary for offline use."
+            return 1
+        }
+        return 0
+    fi
     readInstallType
     local prereleaseStatus=false
     if [[ "$2" == "true" ]]; then
@@ -3759,7 +3778,11 @@ IPTABLES
 
 # Delete legacy iptables rules from highest index down, preserving unrelated rules.
 deleteLegacyPortHopping() {
-    local type=$1 targetPort=$2 backend=$3 start=$4 end=$5 tool rules lines line
+    local type=$1 backend=$2 tool rules lines line
+    if [[ "${backend}" != legacy-iptables ]]; then
+        echoContent red "Review and remove unlabelled legacy firewalld rules manually."
+        return 1
+    fi
     for tool in iptables ip6tables; do
         [[ "${backend}" == legacy-iptables ]] || break
         command -v "${tool}" >/dev/null 2>&1 || continue
@@ -3772,20 +3795,6 @@ deleteLegacyPortHopping() {
     done
     if [[ "${backend}" == legacy-iptables ]] && command -v netfilter-persistent >/dev/null 2>&1; then
         netfilter-persistent save || return 1
-    fi
-    if [[ "${backend}" == legacy-firewalld ]]; then
-        local zone mode spec saved
-        zone=$(firewall-cmd --get-default-zone) || return 1
-        for mode in runtime permanent; do
-            local options=(--zone="${zone}")
-            [[ "${mode}" != permanent ]] || options+=(--permanent)
-            saved=$(firewall-cmd "${options[@]}" --list-forward-ports) || return 1
-            for spec in ${saved}; do
-                if [[ "${spec}" =~ ^port=([0-9]+):proto=udp:toport=([0-9]+):toaddr=$ ]] && [[ "${BASH_REMATCH[2]}" == "${targetPort}" ]] && ((BASH_REMATCH[1] >= start && BASH_REMATCH[1] <= end)); then
-                    firewall-cmd "${options[@]}" --remove-forward-port="${spec}" >/dev/null || return 1
-                fi
-            done
-        done
     fi
 }
 
@@ -3815,12 +3824,16 @@ deletePortHoppingRules() {
             changeFirewalldPortHopping delete "${hoppingZone}" "${hoppingStart}" "${hoppingEnd}" "${hoppingTarget}" || return 1
             ;;
         legacy-iptables|legacy-firewalld)
-            deleteLegacyPortHopping "${type}" "${hoppingTarget}" "${hoppingBackend}" "${hoppingStart}" "${hoppingEnd}" || return 1
+            deleteLegacyPortHopping "${type}" "${hoppingBackend}" || return 1
             ;;
         esac
         rm -f "${file}.json" "${file}.nft" "${file}.iptables" || return 1
     else
         if loadPortHoppingConfig "${type}" "${targetPort}"; then
+            if [[ "${hoppingBackend}" == legacy-firewalld ]]; then
+                echoContent red "Review and remove unlabelled legacy firewalld rules manually."
+                return 1
+            fi
             # Save a deletion checkpoint: runtime removal may succeed while saving
             # persistent rules fails. The next attempt must still finish cleanup.
             mkdir -p /etc/v2ray-agent/port-hopping && chmod 700 /etc/v2ray-agent/port-hopping || return 1
@@ -6883,7 +6896,7 @@ unInstall() {
     fi
 
     rm -rf -- /etc/v2ray-agent/{xray,sing-box,tls,warp,subscribe,subscribe_local,subscribe_remote,port-hopping} || return 1
-    rm -f -- /etc/v2ray-agent/{install.sh,install.log,crontab_tls.log,crontab_updateGeoSite.log}
+    rm -f -- /etc/v2ray-agent/{install.sh,install.log,sing-box-client.json,crontab_tls.log,crontab_updateGeoSite.log}
     rm -f ${nginxConfigPath}alone.conf
     rm -f ${nginxConfigPath}checkPortOpen.conf >/dev/null 2>&1
     rm -f "${nginxConfigPath}sing_box_VMess_HTTPUpgrade.conf" >/dev/null 2>&1
@@ -7524,10 +7537,12 @@ aliasInstall() {
 }
 
 # 检查ipv6、ipv4
-checkIPv6() {
-    currentIPv6IP=$(getPublicIP 6)
+hasLocalIPv6() {
+    [[ -n "${VASMA_PUBLIC_IPV6:-}" ]] || ip -6 addr show scope global | grep -q 'inet6 '
+}
 
-    if [[ -z "${currentIPv6IP}" ]]; then
+checkIPv6() {
+    if ! hasLocalIPv6; then
         echoContent red " ---> 不支持ipv6"
         exit 0
     fi
@@ -10848,7 +10863,7 @@ installSubscribe() {
             serverName="server_name ${subscribeServerName};"
             nginxSubscribeSSL="ssl_certificate /etc/v2ray-agent/tls/${subscribeServerName}.crt;ssl_certificate_key /etc/v2ray-agent/tls/${subscribeServerName}.key;"
         fi
-        if [[ -n "$(getPublicIP 6)" ]]; then
+        if hasLocalIPv6; then
             listenIPv6="listen [::]:${result[-1]} ${SSLType};"
         fi
         if echo "${nginxVersion}" | grep -q "1.25" && [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $3}') -gt 0 ]] || [[ $(echo "${nginxVersion}" | awk -F "[.]" '{print $2}') -gt 25 ]]; then
