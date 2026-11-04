@@ -80,6 +80,12 @@ vasmad
 *   **反馈:** [提交 issue](https://github.com/mack-a/v2ray-agent/issues)
 *   **X:** [链接](https://x.com/v2rayagent)
 
+## 安全、离线安装和更新
+
+Clean Secure Edition `clean.1` 源自 mack-a/v2ray-agent v3.5.37。更新菜单提供 Fork 地址供手工审核。安装使用经审核的完整源码，手动替换脚本前先备份。离线 Reality 可预置经核验的软件包、核心和规则，或导入 Docker 镜像后设置 `VASMA_OFFLINE=1`。
+
+详见[安全策略与迁移](docs/SECURITY.md)、[联网访问清单](docs/NETWORK_ACCESS.md)、[伪装站 ZIP 审计](docs/CAMOUFLAGE_AUDIT.md)和[上游同步](docs/UPSTREAM_SYNC.md)。
+
 ## 许可证
 
 本项根据 [AGPL-3.0 许可证](LICENSE) 授权.

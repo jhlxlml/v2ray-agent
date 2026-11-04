@@ -25,7 +25,7 @@ An installation and management script for Xray-core and sing-box, with regular h
 ## Requirements
 
 *   **Regular installation:** Linux with root privileges; CentOS, Debian, Ubuntu, and Alpine are supported on amd64/x86_64 and arm64/aarch64.
-*   **Docker Reality:** Linux with root or sudo privileges and a running Docker daemon; the script can offer to install Docker interactively.
+*   **Docker Reality:** Linux with root or sudo privileges and a running Docker daemon.
 
 ## Quick Start
 
@@ -73,6 +73,12 @@ The Docker launcher supports Reality Vision, Reality XHTTP, or both modes. After
 *   **Feedback:** [Submit an issue](https://github.com/mack-a/v2ray-agent/issues)
 *   **X:** [Link](https://x.com/v2rayagent)
 
+## Security, offline setup and updates
+
+Clean Secure Edition `clean.1` is based on mack-a/v2ray-agent v3.5.37. The update menu links to the fork for review. Use the full source tree from a reviewed commit for installation, and make a private backup before manually replacing an installed script. For offline Reality setup, stage verified dependencies, cores and rules or Docker images, then use `VASMA_OFFLINE=1`.
+
+See [security and migration](../../docs/SECURITY.md), [network access](../../docs/NETWORK_ACCESS.md), [camouflage template audit](../../docs/CAMOUFLAGE_AUDIT.md) and [upstream sync](../../docs/UPSTREAM_SYNC.md).
+
 ## License
 
-This project is licensed under the [AGPL-3.0 License](LICENSE).
+This project is licensed under the [AGPL-3.0 License](../../LICENSE).
