@@ -71,13 +71,6 @@ The Docker launcher supports Reality Vision, Reality XHTTP, or both modes. After
 *   **Feedback:** [Submit an issue](https://github.com/mack-a/v2ray-agent/issues)
 *   **X:** [Link](https://x.com/v2rayagent)
 
-## Donation
-
-Thank you for your attention and support for this open source project. If you find this project helpful, you are welcome to donate in the following ways.
-
-*   [Donate by purchasing a VPS](https://www.v2ray-agent.com/categories/vps)
-*   [Donate to me via cryptocurrency](https://www.v2ray-agent.com/1679123834836)
-
 ## License
 
 This project is licensed under the [AGPL-3.0 License](LICENSE).

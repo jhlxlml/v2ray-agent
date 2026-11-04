@@ -78,13 +78,6 @@ vasmad
 *   **反馈:** [提交 issue](https://github.com/mack-a/v2ray-agent/issues)
 *   **X:** [链接](https://x.com/v2rayagent)
 
-## 捐赠
-
-感谢您对开源项目的关注和支持。如果您觉得这个项目对您有帮助，欢迎通过以下方式进行捐赠。
-
-*   [购买VPS捐赠](https://www.v2ray-agent.com/categories/vps)
-*   [通过虚拟币向我捐赠](https://www.v2ray-agent.com/1679123834836)
-
 ## 许可证
 
 本项根据 [AGPL-3.0 许可证](LICENSE) 授权.
